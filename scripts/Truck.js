@@ -2417,11 +2417,8 @@ class Truck {
         if (!this.root) return;
         // Ensure the root's world matrix is up to date before transforming local offsets.
         this.root.computeWorldMatrix(true);
-        if (this.physicsRoot) {
-            this.physicsRoot.position.copyFrom(this.root.position);
-            this.physicsRoot.rotation.copyFrom(this.root.rotation);
-            this.physicsRoot.computeWorldMatrix(true);
-        }
+        const parentNode = this.physicsRoot || this.root;
+        parentNode.computeWorldMatrix(true);
         
         // Cache rotation quaternion - use same rotation as visual truck
         // Note: Position calc uses -rotation, but quaternion should match visual truck directly
@@ -2439,7 +2436,7 @@ class Truck {
         const nowMs = performance.now();
         if (!this._lastPhysicsSyncLog || nowMs - this._lastPhysicsSyncLog > 2000) {
             this._lastPhysicsSyncLog = nowMs;
-            console.log(`🔧 Physics sync: truck=(${this.position.x.toFixed(2)}, ${this.position.z.toFixed(2)}) rot=${(this.rotation * 180 / Math.PI).toFixed(1)}° root.rot.y=${(this.root.rotation.y * 180 / Math.PI).toFixed(1)}°`);
+            console.log(`🔧 Physics sync: truck=(${this.position.x.toFixed(2)}, ${this.position.z.toFixed(2)}) rot=${(this.rotation * 180 / Math.PI).toFixed(1)}° root.rot.y=${(this.root.rotation.y * 180 / Math.PI).toFixed(1)}° parent=${parentNode.name || 'root'}`);
         }
         
         for (let i = 0; i < this.truckPhysicsAggregates.length; i++) {
@@ -2457,19 +2454,18 @@ class Truck {
                 continue;
             }
             
-            // Update mesh local position/rotation; parent (physicsRoot or root) handles world transform
-            mesh.position.set(localX, localY, localZ);
+            // Transform local offsets through parent matrix to world space
+            const localVec = new BABYLON.Vector3(localX, localY, localZ);
+            const worldVec = BABYLON.Vector3.TransformCoordinates(localVec, parentNode.getWorldMatrix());
+
+            // Update mesh position and rotation (unparented)
+            mesh.position.set(worldVec.x, worldVec.y, worldVec.z);
             if (!mesh.rotationQuaternion) {
                 mesh.rotationQuaternion = BABYLON.Quaternion.Identity();
             }
             mesh.rotationQuaternion.copyFrom(this._physicsRotQuat);
-            mesh.computeWorldMatrix(true);
-
-            // Use absolute position for body transform
-            const worldVec = mesh.getAbsolutePosition();
             
-            // IMPORTANT: For moving bodies, we must set the target transform
-            // on the physics body, not just update the mesh
+            // IMPORTANT: For moving bodies, set the target transform on the physics body
             this._physicsTargetPos.set(worldVec.x, worldVec.y, worldVec.z);
             aggregate.body.setTargetTransform(this._physicsTargetPos, this._physicsRotQuat);
         }
