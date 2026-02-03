@@ -988,10 +988,12 @@ class ItemManager {
                 aggregate.body.setLinearDamping(0.15);
                 aggregate.body.setAngularDamping(0.05);
 
-                // Ensure collisions with truck (group 2) and other items (group 1)
+                // Use default collide-all mask to avoid any filter mismatch
                 if (aggregate.body.setCollisionFilterMembership) {
                     aggregate.body.setCollisionFilterMembership(1);
-                    aggregate.body.setCollisionFilterCollideMask(1 | 2);
+                }
+                if (aggregate.body.setCollisionFilterCollideMask) {
+                    aggregate.body.setCollisionFilterCollideMask(~0 >>> 0); // all bits
                 }
 
                 // Enable CCD to stop tunneling through floor/walls

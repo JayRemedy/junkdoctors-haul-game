@@ -2491,13 +2491,14 @@ class Truck {
                 backGap,
                 floorDepth
             };
+            const floorThickness = 0.3;
             this.truckFloorMesh = BABYLON.MeshBuilder.CreateBox('truckPhysicsFloor', {
                 width: this.cargoWidth + 0.2,  // Slightly wider than cargo for edge grip
-                height: 0.2,
+                height: floorThickness,
                 depth: floorDepth
             }, this.scene);
-            // Center the floor, shifted forward slightly
-            this.truckFloorMesh.position.set(0, this.floorTopY - 0.12, -backGap / 2);
+            // Center the floor; top surface aligns with visual cargo floor
+            this.truckFloorMesh.position.set(0, this.floorTopY - floorThickness / 2, -backGap / 2);
             this.truckFloorMesh.isVisible = false;
             this.truckFloorMesh.isPickable = false;
             
@@ -2605,16 +2606,18 @@ class Truck {
                 // CRITICAL: Use larger collision margin for walls to create buffer zone
                 // This prevents fast-moving items from interpenetrating before collision response
                 if (aggregate.shape && aggregate.shape.setMargin) {
-                    // Walls need larger margin (0.1m) to catch items before they pass through
-                    // Floor uses smaller margin to allow items to rest properly
-                    const margin = isWall ? 0.1 : 0.03;
+                    // Use generous margins to avoid tunneling at high speed
+                    const margin = isWall ? 0.12 : 0.08;
                     aggregate.shape.setMargin(margin);
                 }
                 
                 // Set collision filter - truck parts are in group 2
                 if (aggregate.body && aggregate.body.setCollisionFilterMembership) {
-                    aggregate.body.setCollisionFilterMembership(2);
-                    aggregate.body.setCollisionFilterCollideMask(1 | 2); // Collide with items (1) and other truck parts (2)
+                    // Use default group 1 and collide with everything to avoid filter mismatches
+                    aggregate.body.setCollisionFilterMembership(1);
+                }
+                if (aggregate.body && aggregate.body.setCollisionFilterCollideMask) {
+                    aggregate.body.setCollisionFilterCollideMask(~0 >>> 0);
                 }
                 
                 // Enable CCD on moving walls - this helps when truck moves fast
