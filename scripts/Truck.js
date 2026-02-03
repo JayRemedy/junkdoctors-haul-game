@@ -2417,6 +2417,11 @@ class Truck {
         if (!this.root) return;
         // Ensure the root's world matrix is up to date before transforming local offsets.
         this.root.computeWorldMatrix(true);
+        if (this.physicsRoot) {
+            this.physicsRoot.position.copyFrom(this.root.position);
+            this.physicsRoot.rotation.copyFrom(this.root.rotation);
+            this.physicsRoot.computeWorldMatrix(true);
+        }
         
         // Cache rotation quaternion - use same rotation as visual truck
         // Note: Position calc uses -rotation, but quaternion should match visual truck directly
@@ -2452,16 +2457,16 @@ class Truck {
                 continue;
             }
             
-            // Transform to world position using Babylon's actual matrix
-            const localVec = new BABYLON.Vector3(localX, localY, localZ);
-            const worldVec = BABYLON.Vector3.TransformCoordinates(localVec, this.root.getWorldMatrix());
-
-            // Update mesh position and rotation
-            mesh.position.set(worldVec.x, worldVec.y, worldVec.z);
+            // Update mesh local position/rotation; parent (physicsRoot or root) handles world transform
+            mesh.position.set(localX, localY, localZ);
             if (!mesh.rotationQuaternion) {
                 mesh.rotationQuaternion = BABYLON.Quaternion.Identity();
             }
             mesh.rotationQuaternion.copyFrom(this._physicsRotQuat);
+            mesh.computeWorldMatrix(true);
+
+            // Use absolute position for body transform
+            const worldVec = mesh.getAbsolutePosition();
             
             // IMPORTANT: For moving bodies, we must set the target transform
             // on the physics body, not just update the mesh
