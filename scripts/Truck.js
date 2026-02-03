@@ -2491,7 +2491,7 @@ class Truck {
                 backGap,
                 floorDepth
             };
-            const floorThickness = 0.3;
+            const floorThickness = 0.5; // Match visual floor thickness for perfect overlap
             this.truckFloorMesh = BABYLON.MeshBuilder.CreateBox('truckPhysicsFloor', {
                 width: this.cargoWidth + 0.2,  // Slightly wider than cargo for edge grip
                 height: floorThickness,
@@ -2607,7 +2607,7 @@ class Truck {
                 // This prevents fast-moving items from interpenetrating before collision response
                 if (aggregate.shape && aggregate.shape.setMargin) {
                     // Use generous margins to avoid tunneling at high speed
-                    const margin = isWall ? 0.12 : 0.08;
+                    const margin = isWall ? 0.12 : 0.15; // floor gets extra thickness for reliable contact
                     aggregate.shape.setMargin(margin);
                 }
                 
