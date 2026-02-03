@@ -957,7 +957,7 @@ class ItemManager {
         let placedItem;
 
         if (physicsEnabled) {
-            // === PHYSICS MODE: Items use Havok physics ===
+            // === PHYSICS MODE: Items use live Havok bodies immediately ===
             // Position in world space, don't parent to truck
             mesh.position = new BABYLON.Vector3(placeX, placeY + 0.02, placeZ);
             mesh.rotationQuaternion = BABYLON.Quaternion.RotationYawPitchRoll(placeRotation, 0, 0);
@@ -968,6 +968,35 @@ class ItemManager {
             mesh.receiveShadows = true;
             mesh.isPickable = true;
             this.sceneManager.addShadowCaster(mesh);
+
+            // Create the physics body right away so placement matches the preview
+            const aggregate = new BABYLON.PhysicsAggregate(
+                mesh,
+                BABYLON.PhysicsShapeType.BOX,
+                {
+                    mass: Math.max(1, itemDef.weight || 10),
+                    restitution: 0.05,
+                    friction: 0.9
+                },
+                this.scene
+            );
+            mesh.physicsAggregate = aggregate;
+
+            if (aggregate.body) {
+                // Fully dynamic from the start for natural tipping/sliding
+                aggregate.body.setMotionType(BABYLON.PhysicsMotionType.DYNAMIC);
+                aggregate.body.setLinearDamping(0.15);
+                aggregate.body.setAngularDamping(0.05);
+
+                // Ensure collisions with truck (group 2) and other items (group 1)
+                if (aggregate.body.setCollisionFilterMembership) {
+                    aggregate.body.setCollisionFilterMembership(1);
+                    aggregate.body.setCollisionFilterCollideMask(1 | 2);
+                }
+
+                // Enable CCD to stop tunneling through floor/walls
+                this.applyCcdSettings(aggregate.body, boxSize);
+            }
 
             console.log(`📦 PLACED ITEM ${itemDef.id} (PHYSICS): World=(${placeX.toFixed(2)}, ${placeY.toFixed(2)}, ${placeZ.toFixed(2)})`);
 
@@ -985,15 +1014,8 @@ class ItemManager {
                 localY: localY,
                 localZ: localZ,
                 localRotation: localRotation,
-                // Schedule physics creation after settling
-                createPhysicsAt: nowMs + 100 // Create physics after 100ms
-            };
-
-            // Mark mesh for pending physics (will be created by truck.updateLoadedItems)
-            mesh._pendingPhysics = {
-                mass: Math.max(1, itemDef.weight || 10),
-                restitution: 0.1,
-                friction: 0.8
+                baseLinearDamping: 0.15,
+                baseAngularDamping: 0.05
             };
 
         } else {
