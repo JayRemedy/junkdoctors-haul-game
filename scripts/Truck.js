@@ -2560,8 +2560,9 @@ class Truck {
             console.log(`   Right wall: localX=${this.truckRightWallMesh.position.x.toFixed(2)} (inner edge at ${(this.cargoWidth/2).toFixed(2)})`);
             console.log(`   Front wall: localZ=${this.truckFrontWallMesh.position.z.toFixed(2)} (inner edge at ${(-this.cargoLength/2).toFixed(2)})`);
             
-            // Parent all to a physics root that follows the truck
+            // Parent all to a physics root that follows the truck (needed for transforms)
             this.physicsRoot = new BABYLON.TransformNode('truckPhysicsRoot', this.scene);
+            this.physicsRoot.parent = this.root; // Keep physics aligned with visual truck
             this.truckFloorMesh.parent = this.physicsRoot;
             this.truckLeftWallMesh.parent = this.physicsRoot;
             this.truckRightWallMesh.parent = this.physicsRoot;
@@ -2579,15 +2580,25 @@ class Truck {
             
             this.truckPhysicsAggregates = [];
             physicsParts.forEach(({ mesh, friction, restitution, isWall }) => {
-                // CRITICAL: Store the LOCAL position BEFORE unparenting
-                // After unparenting, mesh.position becomes the world position
+                // CRITICAL: Ensure world transform matches current parented pose
+                mesh.computeWorldMatrix(true);
+                const worldPos = mesh.getAbsolutePosition();
+                const worldRot = mesh.rotationQuaternion ? mesh.rotationQuaternion.clone() : BABYLON.Quaternion.RotationYawPitchRoll(mesh.rotation.y, mesh.rotation.x, mesh.rotation.z);
+
+                // Store parented local offsets for later sync
                 const localPos = mesh.position.clone();
                 mesh._localPosX = localPos.x;
                 mesh._localPosY = localPos.y;
                 mesh._localPosZ = localPos.z;
                 
-                // Unparent temporarily for physics creation
+                // Unparent temporarily for physics creation while preserving pose
                 mesh.parent = null;
+                mesh.position.copyFrom(worldPos);
+                if (!mesh.rotationQuaternion) {
+                    mesh.rotationQuaternion = worldRot.clone();
+                } else {
+                    mesh.rotationQuaternion.copyFrom(worldRot);
+                }
                 mesh.computeWorldMatrix(true);
             
                 const aggregate = new BABYLON.PhysicsAggregate(
