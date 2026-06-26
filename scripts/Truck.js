@@ -1883,8 +1883,17 @@ class Truck {
                 continue;
             }
 
-            // Transition from KINEMATIC to DYNAMIC after physics creation
-            if (body && item.becomeDynamicAt && itemsNowMs >= item.becomeDynamicAt) {
+            // Transition from KINEMATIC to DYNAMIC after physics creation.
+            // Newly placed cargo stays locked while parked so placement cannot
+            // inject a rotation/bounce impulse.
+            if (body && item.becomeDynamicAt && itemsNowMs >= item.becomeDynamicAt && item.holdDynamicUntilTruckMoves && !isTruckMoving) {
+                if (body.setLinearVelocity) body.setLinearVelocity(BABYLON.Vector3.Zero());
+                if (body.setAngularVelocity) body.setAngularVelocity(BABYLON.Vector3.Zero());
+                if (!item._heldKinematicLogged) {
+                    console.log(`🔒 ${item.id} held KINEMATIC until truck moves`);
+                    item._heldKinematicLogged = true;
+                }
+            } else if (body && item.becomeDynamicAt && itemsNowMs >= item.becomeDynamicAt) {
                 // Zero ALL velocities before transition
                 body.setLinearVelocity(BABYLON.Vector3.Zero());
                 body.setAngularVelocity(BABYLON.Vector3.Zero());
@@ -1904,6 +1913,7 @@ class Truck {
                 item._justBecameDynamic = true;
                 item._dynamicFrame = 0;
                 item._lastVelCheck = itemsNowMs;
+                item.holdDynamicUntilTruckMoves = false;
                 item.becomeDynamicAt = 0;
                 console.log(`✅ ${item.id} now DYNAMIC (velocity guard active)`);
             }

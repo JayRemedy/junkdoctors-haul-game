@@ -944,15 +944,17 @@ class ItemManager {
         mat.roughness = 0.8;
         mesh.material = mat;
 
+        const nowMs = performance.now();
+        const physicsEnabled = this.game && this.game.physicsEnabled;
+        const physicsLift = physicsEnabled ? 0.005 : 0.02;
+
         // Convert world position to truck-local position
         const local = this._worldToTruckLocalXZ(placeX, placeZ);
         const localX = local.x;
         const localZ = local.z;
-        const localY = placeY + 0.02; // Small lift above floor
+        const localY = placeY + physicsLift; // Small lift above floor
         const localRotation = placeRotation - this.truck.rotation;
 
-        const nowMs = performance.now();
-        const physicsEnabled = this.game && this.game.physicsEnabled;
         const baseLinearDamping = 5.0;
         const baseAngularDamping = 10.0;
 
@@ -961,7 +963,7 @@ class ItemManager {
         if (physicsEnabled) {
             // === PHYSICS MODE: Items use live Havok bodies immediately ===
             // Position in world space, don't parent to truck
-            mesh.position = new BABYLON.Vector3(placeX, placeY + 0.02, placeZ);
+            mesh.position = new BABYLON.Vector3(placeX, localY, placeZ);
             mesh.rotationQuaternion = BABYLON.Quaternion.RotationYawPitchRoll(placeRotation, 0, 0);
 
             // Attach 3D model if available
@@ -1025,6 +1027,7 @@ class ItemManager {
                 baseLinearDamping,
                 baseAngularDamping,
                 becomeDynamicAt: nowMs + 250,
+                holdDynamicUntilTruckMoves: true,
                 dampingBoostUntil: nowMs + 1800,
                 _dampingBoosted: true,
                 lockLateralUntil: nowMs + 900
