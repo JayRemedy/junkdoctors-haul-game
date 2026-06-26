@@ -2251,6 +2251,7 @@ class Truck {
             
             const halfX = item.size ? item.size.x / 2 : 0.3;
             const halfZ = item.size ? item.size.z / 2 : 0.3;
+            const halfY = item.size ? item.size.y / 2 : 0.3;
 
             // Calculate local position (item center relative to truck center)
             let localX, localZ, localY;
@@ -2272,6 +2273,35 @@ class Truck {
             item.localX = localX;
             item.localZ = localZ;
             item.localY = localY;
+
+            const overBedFootprint =
+                Math.abs(localX) <= this.cargoWidth / 2 + halfX * 0.5 &&
+                localZ >= -this.cargoLength / 2 - halfZ * 0.5 &&
+                localZ <= this.cargoLength / 2 + halfZ * 0.5;
+            const itemBottomY = item.mesh.position.y - halfY;
+            const floorPenetration = this.floorTopY - itemBottomY;
+
+            if (!item.isParented && overBedFootprint && floorPenetration > 0.03) {
+                const correctedY = item.mesh.position.y + floorPenetration + 0.02;
+                item.mesh.position.y = correctedY;
+                item.localY = correctedY;
+
+                if (body) {
+                    const quat = item.mesh.rotationQuaternion || BABYLON.Quaternion.Identity();
+                    this.teleportItemBody(
+                        item,
+                        body,
+                        new BABYLON.Vector3(item.mesh.position.x, correctedY, item.mesh.position.z),
+                        quat,
+                        performance.now()
+                    );
+                }
+
+                console.warn(`⬇️ FLOOR BREACH: ${item.id || item.mesh.name}`,
+                    `bottom=${itemBottomY.toFixed(2)} < floor=${this.floorTopY.toFixed(2)}`,
+                    `moving y to ${correctedY.toFixed(2)}`
+                );
+            }
 
             // Skip wall breach correction for parented items - they have no physics
             // and can't move on their own. Player placed them where they wanted.
