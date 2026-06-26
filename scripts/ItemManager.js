@@ -955,8 +955,8 @@ class ItemManager {
         const localY = placeY + physicsLift; // Small lift above floor
         const localRotation = placeRotation - this.truck.rotation;
 
-        const baseLinearDamping = 5.0;
-        const baseAngularDamping = 10.0;
+        const baseLinearDamping = 6.0;
+        const baseAngularDamping = 14.0;
 
         let placedItem;
 
@@ -980,17 +980,21 @@ class ItemManager {
                 {
                     mass: Math.max(1, itemDef.weight || 10),
                     restitution: 0.0,
-                    friction: 1.2
+                    friction: 2.0
                 },
                 this.scene
             );
             mesh.physicsAggregate = aggregate;
 
+            if (aggregate.shape && aggregate.shape.setMargin) {
+                aggregate.shape.setMargin(0.02);
+            }
+
             if (aggregate.body) {
                 // Hold the item briefly at the preview position before enabling
                 // dynamics. This prevents a placement collision impulse from
                 // turning into visible bounce.
-                aggregate.body.setMotionType(BABYLON.PhysicsMotionType.KINEMATIC);
+                aggregate.body.setMotionType(BABYLON.PhysicsMotionType.ANIMATED);
                 aggregate.body.setLinearVelocity(BABYLON.Vector3.Zero());
                 aggregate.body.setAngularVelocity(BABYLON.Vector3.Zero());
                 aggregate.body.setLinearDamping(30.0);
@@ -1027,7 +1031,6 @@ class ItemManager {
                 baseLinearDamping,
                 baseAngularDamping,
                 becomeDynamicAt: nowMs + 250,
-                holdDynamicUntilTruckMoves: true,
                 dampingBoostUntil: nowMs + 1800,
                 _dampingBoosted: true,
                 lockLateralUntil: nowMs + 900

@@ -1511,8 +1511,12 @@ class Truck {
         
         if (!this.loadedItems || this.loadedItems.length === 0) return;
         
-        const cos = Math.cos(this.rotation);
-        const sin = Math.sin(this.rotation);
+        this.root.position.x = this.position.x;
+        this.root.position.z = this.position.z;
+        this.root.rotation.y = this.rotation;
+        this.root.computeWorldMatrix(true);
+        const invMatrix = this.root.getWorldMatrix().clone();
+        invMatrix.invert();
         
         // Wall positions (inner edge)
         const wallX = this.cargoWidth / 2;
@@ -1535,11 +1539,10 @@ class Truck {
                 item._ccdEnabled = true;
             }
             
-            // Calculate local position
-            const dx = item.mesh.position.x - this.position.x;
-            const dz = item.mesh.position.z - this.position.z;
-            const localX = dx * cos + dz * sin;
-            const localZ = -dx * sin + dz * cos;
+            const worldVec = new BABYLON.Vector3(item.mesh.position.x, item.mesh.position.y, item.mesh.position.z);
+            const localVec = BABYLON.Vector3.TransformCoordinates(worldVec, invMatrix);
+            const localX = localVec.x;
+            const localZ = localVec.z;
             
             // Item dimensions
             const halfX = item.size ? item.size.x / 2 : 0.3;
@@ -1550,8 +1553,8 @@ class Truck {
             const rightPenetration = (localX + halfX) - wallX;     // positive = penetrating right wall
             const frontPenetration = wallFrontZ - (localZ - halfZ); // positive = penetrating front wall
             
-            // DIAGNOSTIC LOGGING for wall penetrations
-            if (canLogWall && (leftPenetration > 0 || rightPenetration > 0 || frontPenetration > 0)) {
+            // Diagnostic logging only for deep penetration; shallow contact is normal with thick walls.
+            if (canLogWall && (leftPenetration > 0.6 || rightPenetration > 0.6 || frontPenetration > 0.6)) {
                 const vel = body.getLinearVelocity ? body.getLinearVelocity() : null;
                 const angVel = body.getAngularVelocity ? body.getAngularVelocity() : null;
                 
@@ -1726,17 +1729,61 @@ class Truck {
         if (!body || !body.setMotionType || !body.getMotionType) return;
         const currentType = body.getMotionType();
         item._restoreMotionType = currentType;
-        // Use KINEMATIC (not ANIMATED) to fully disable physics responses
-        // Longer settle time to ensure no residual forces
+        // Use ANIMATED to move the body explicitly while it settles.
         item._restoreMotionAt = nowMs + 150;
-        body.setMotionType(BABYLON.PhysicsMotionType.KINEMATIC);
+        body.setMotionType(BABYLON.PhysicsMotionType.ANIMATED);
         // Zero velocities immediately
         if (body.setLinearVelocity) body.setLinearVelocity(BABYLON.Vector3.Zero());
         if (body.setAngularVelocity) body.setAngularVelocity(BABYLON.Vector3.Zero());
-        // Direct position update for KINEMATIC bodies
+        // Direct position update for animated bodies
         if (body.setTargetTransform) {
             body.setTargetTransform(position, rotation);
         }
+    }
+
+    applyCargoBedImpulse(item, body, localX, localZ, dt, truckVelX, truckVelZ) {
+        if (!item || !body || !body.getLinearVelocity || !body.applyImpulse || !dt) return;
+        if (body.getMotionType && body.getMotionType() !== BABYLON.PhysicsMotionType.DYNAMIC) return;
+
+        const halfX = item.size ? item.size.x / 2 : 0.3;
+        const halfY = item.size ? item.size.y / 2 : 0.3;
+        const halfZ = item.size ? item.size.z / 2 : 0.3;
+        const itemBottomY = item.mesh.position.y - halfY;
+        const onBedFloor = itemBottomY >= this.floorTopY - 0.08 && itemBottomY <= this.floorTopY + 0.25;
+        const overBedFootprint =
+            Math.abs(localX) <= this.cargoWidth / 2 + halfX * 0.35 &&
+            localZ >= -this.cargoLength / 2 - halfZ * 0.35 &&
+            localZ <= this.cargoLength / 2 + halfZ * 0.35;
+
+        if (!onBedFloor || !overBedFootprint) return;
+
+        const vel = body.getLinearVelocity();
+        if (!vel) return;
+
+        const relX = truckVelX - vel.x;
+        const relZ = truckVelZ - vel.z;
+        const relSpeed = Math.sqrt(relX * relX + relZ * relZ);
+        if (relSpeed < 0.05) return;
+
+        const massProps = body.getMassProperties ? body.getMassProperties() : null;
+        const mass = Math.max(1, massProps && massProps.mass ? massProps.mass : (item.weight || 10));
+        const maxDeltaSpeed = 24.0 * dt;
+        const impulseScale = Math.min(1, maxDeltaSpeed / relSpeed);
+
+        if (!this._cargoBedImpulse) this._cargoBedImpulse = new BABYLON.Vector3();
+        if (!this._cargoBedImpulsePoint) this._cargoBedImpulsePoint = new BABYLON.Vector3();
+
+        this._cargoBedImpulse.set(
+            relX * impulseScale * mass,
+            0,
+            relZ * impulseScale * mass
+        );
+        this._cargoBedImpulsePoint.set(
+            item.mesh.position.x,
+            item.mesh.position.y,
+            item.mesh.position.z
+        );
+        body.applyImpulse(this._cargoBedImpulse, this._cargoBedImpulsePoint);
     }
     
     updateLoadedItems(dt, moveX, moveZ, rotationDelta) {
@@ -1760,9 +1807,9 @@ class Truck {
         const isTruckMoving = Math.abs(this.speed) > 0.5;
         
         // STRICT velocity limits - items should never move this fast relative to truck
-        const MAX_REL_LINEAR_VELOCITY = 8.0;   // 8 m/s max relative motion
-        const MAX_ANGULAR_VELOCITY = 3.0;  // 3 rad/s max (was uncapped)
-        const MAX_VERTICAL_VELOCITY = 4.0; // 4 m/s max vertical
+        const MAX_REL_LINEAR_VELOCITY = 6.0;   // m/s max relative motion
+        const MAX_ANGULAR_VELOCITY = 1.6;      // rad/s max spin
+        const MAX_VERTICAL_VELOCITY = 1.4;     // m/s max vertical bounce
 
         const truckVelX = dt > 0 ? (moveX / dt) : 0;
         const truckVelZ = dt > 0 ? (moveZ / dt) : 0;
@@ -1783,7 +1830,7 @@ class Truck {
 
             const body = item.mesh.physicsAggregate && item.mesh.physicsAggregate.body;
 
-            // Restore items that were temporarily made KINEMATIC for teleportation
+            // Restore items that were temporarily made animated for teleportation
             this.restoreItemMotionType(item, body, itemsNowMs);
 
             // Create physics for newly placed items after settling period
@@ -1851,9 +1898,13 @@ class Truck {
                 );
                 item.mesh.physicsAggregate = aggregate;
 
+                if (aggregate.shape && aggregate.shape.setMargin) {
+                    aggregate.shape.setMargin(0.02);
+                }
+
                 if (aggregate.body) {
-                    // IMMEDIATELY set to KINEMATIC to prevent any physics response
-                    aggregate.body.setMotionType(BABYLON.PhysicsMotionType.KINEMATIC);
+                    // Hold as ANIMATED until the item can be released cleanly.
+                    aggregate.body.setMotionType(BABYLON.PhysicsMotionType.ANIMATED);
 
                     // Zero velocities
                     aggregate.body.setLinearVelocity(BABYLON.Vector3.Zero());
@@ -1873,7 +1924,7 @@ class Truck {
                 // Clear pending physics flag, set time to become DYNAMIC
                 item.mesh._pendingPhysics = null;
                 item.createPhysicsAt = 0;
-                item.becomeDynamicAt = itemsNowMs + 200; // Longer KINEMATIC period (200ms)
+                item.becomeDynamicAt = itemsNowMs + 200; // Brief animated settle period
 
                 // Extended damping boost period
                 item.dampingBoostUntil = itemsNowMs + 1000;
@@ -1883,26 +1934,20 @@ class Truck {
                 continue;
             }
 
-            // Transition from KINEMATIC to DYNAMIC after physics creation.
-            // Newly placed cargo stays locked while parked so placement cannot
-            // inject a rotation/bounce impulse.
-            if (body && item.becomeDynamicAt && itemsNowMs >= item.becomeDynamicAt && item.holdDynamicUntilTruckMoves && !isTruckMoving) {
-                if (body.setLinearVelocity) body.setLinearVelocity(BABYLON.Vector3.Zero());
-                if (body.setAngularVelocity) body.setAngularVelocity(BABYLON.Vector3.Zero());
-                if (!item._heldKinematicLogged) {
-                    console.log(`🔒 ${item.id} held KINEMATIC until truck moves`);
-                    item._heldKinematicLogged = true;
-                }
-            } else if (body && item.becomeDynamicAt && itemsNowMs >= item.becomeDynamicAt) {
-                // Zero ALL velocities before transition
-                body.setLinearVelocity(BABYLON.Vector3.Zero());
+            // Transition from animated placement hold to DYNAMIC after physics creation.
+            if (body && item.becomeDynamicAt && itemsNowMs >= item.becomeDynamicAt) {
+                const releaseVelocity = new BABYLON.Vector3(truckVelX, 0, truckVelZ);
+                // Match the truck's current world velocity at release. This is
+                // the physical initial condition for cargo that was resting on
+                // the moving bed, and avoids a wall-slam impulse.
+                body.setLinearVelocity(releaseVelocity);
                 body.setAngularVelocity(BABYLON.Vector3.Zero());
 
                 // Transition to DYNAMIC
                 body.setMotionType(BABYLON.PhysicsMotionType.DYNAMIC);
 
-                // IMMEDIATELY zero velocities again - Havok may have applied impulse
-                body.setLinearVelocity(BABYLON.Vector3.Zero());
+                // Re-apply after motion-type change; Havok may reset velocity.
+                body.setLinearVelocity(releaseVelocity);
                 body.setAngularVelocity(BABYLON.Vector3.Zero());
 
                 // Maximum damping during transition period
@@ -1913,32 +1958,32 @@ class Truck {
                 item._justBecameDynamic = true;
                 item._dynamicFrame = 0;
                 item._lastVelCheck = itemsNowMs;
-                item.holdDynamicUntilTruckMoves = false;
                 item.becomeDynamicAt = 0;
                 console.log(`✅ ${item.id} now DYNAMIC (velocity guard active)`);
             }
 
-            // Aggressive velocity clamping for items that just became dynamic
+            // Brief settling guard for items that just became dynamic
             if (body && item._justBecameDynamic) {
                 item._dynamicFrame = (item._dynamicFrame || 0) + 1;
 
                 const vel = body.getLinearVelocity();
-                const angVel = body.getAngularVelocity();
 
                 if (vel) {
-                    const horizontalSpeed = Math.sqrt(vel.x * vel.x + vel.z * vel.z);
-                    const totalSpeed = Math.sqrt(vel.x * vel.x + vel.y * vel.y + vel.z * vel.z);
-
-                    // For the first 30 frames (~0.5s at 60fps), be VERY aggressive
+                    // For the first 30 frames, keep only extreme release drift in check.
                     if (item._dynamicFrame <= 30) {
-                        // Allow only gentle settling downward, never upward bounce
+                        const relX = vel.x - truckVelX;
+                        const relZ = vel.z - truckVelZ;
+                        const relSpeed = Math.sqrt(relX * relX + relZ * relZ);
+                        let newVelX = vel.x;
+                        let newVelZ = vel.z;
+                        if (relSpeed > 2.0) {
+                            const scale = 2.0 / relSpeed;
+                            newVelX = truckVelX + relX * scale;
+                            newVelZ = truckVelZ + relZ * scale;
+                        }
+                        // Allow only gentle settling downward, never upward bounce.
                         const allowedY = Math.max(-2.0, Math.min(0, vel.y));
-                        body.setLinearVelocity(new BABYLON.Vector3(0, allowedY, 0));
-                        body.setAngularVelocity(BABYLON.Vector3.Zero());
-                    } else if (horizontalSpeed > 1.0) {
-                        // After initial period, still clamp if moving too fast
-                        const scale = 1.0 / horizontalSpeed;
-                        body.setLinearVelocity(new BABYLON.Vector3(vel.x * scale, vel.y, vel.z * scale));
+                        body.setLinearVelocity(new BABYLON.Vector3(newVelX, allowedY, newVelZ));
                     }
 
                     // Exit guard after 60 frames (~1 second)
@@ -1952,7 +1997,7 @@ class Truck {
                 }
             }
 
-            // Items without physics OR still KINEMATIC need to move with the truck
+            // Items without physics OR still animated need to move with the truck
             // to stay in their local cargo position
             if ((item.createPhysicsAt && item.createPhysicsAt > 0) || (item.becomeDynamicAt && item.becomeDynamicAt > 0)) {
                 // Log to verify we're in settling mode
@@ -2002,7 +2047,7 @@ class Truck {
 
             if (body && item.dampingBoostUntil && itemsNowMs < item.dampingBoostUntil && !isTruckMoving) {
                 const boostedLinear = Math.max(item.baseLinearDamping || 3.0, 12.0);
-                const boostedAngular = Math.max(item.baseAngularDamping || 8.0, 16.0);
+                const boostedAngular = Math.max(item.baseAngularDamping || 8.0, 18.0);
                 if (!item._dampingBoosted) {
                     item._dampingBoosted = true;
                     body.setLinearDamping(boostedLinear);
@@ -2027,22 +2072,8 @@ class Truck {
                 item.lockLateralUntil = 0;
             }
 
-            // When the truck is moving, gently damp relative horizontal velocity so
-            // items ride with the truck instead of lagging and slamming into walls.
-            if (isTruckMoving && body && body.getLinearVelocity && body.setLinearVelocity) {
-                const vel = body.getLinearVelocity();
-                if (vel) {
-                    const relDamping = Math.max(0, 1 - dt * 6); // Reduce relative drift quickly when moving
-                    const relX = vel.x - truckVelX;
-                    const relZ = vel.z - truckVelZ;
-                    const newVelX = truckVelX + relX * relDamping;
-                    const newVelZ = truckVelZ + relZ * relDamping;
-                    if (newVelX !== vel.x || newVelZ !== vel.z) {
-                        body.setLinearVelocity(new BABYLON.Vector3(newVelX, vel.y, newVelZ));
-                    }
-                }
-            }
-            
+            this.applyCargoBedImpulse(item, body, localX, localZ, dt, truckVelX, truckVelZ);
+
             // Update local position tracking
             if (item.mesh.physicsAggregate) {
                 item.localX = localX;
@@ -2187,9 +2218,13 @@ class Truck {
             console.log('✅ enforceItemBounds is running (post-physics)');
         }
 
-        // IMPORTANT: Negate rotation for Babylon.js convention
-        const cos = Math.cos(-this.rotation);
-        const sin = Math.sin(-this.rotation);
+        this.root.position.x = this.position.x;
+        this.root.position.z = this.position.z;
+        this.root.rotation.y = this.rotation;
+        this.root.computeWorldMatrix(true);
+        const worldMatrix = this.root.getWorldMatrix();
+        const invMatrix = worldMatrix.clone();
+        invMatrix.invert();
         
         // Wall positions (inner edge of cargo area)
         const wallInnerX = this.cargoWidth / 2;           // = 1.2m from center
@@ -2198,6 +2233,8 @@ class Truck {
         
         // Safety margin from walls
         const safeMargin = 0.1;  // 10cm safety margin
+        const wallCorrectionTolerance = 0.8; // Let Havok resolve normal contact inside thick walls first
+        const floorCorrectionTolerance = 0.12;
         
         // Outer bounds - beyond this is definitely fallen
         const outerHalfX = this.cargoWidth / 2 + 1.0;
@@ -2206,9 +2243,9 @@ class Truck {
         const floorY = this.floorTopY - 0.5;
         
         // Velocity limits - MUST match updateLoadedItems
-        const MAX_REL_LINEAR_VELOCITY = 8.0;
-        const MAX_ANGULAR_VELOCITY = 3.0;
-        const MAX_VERTICAL_VELOCITY = 4.0;
+        const MAX_REL_LINEAR_VELOCITY = 6.0;
+        const MAX_ANGULAR_VELOCITY = 1.6;
+        const MAX_VERTICAL_VELOCITY = 1.4;
 
         const truckVelX = this._truckWorldVelX || 0;
         const truckVelZ = this._truckWorldVelZ || 0;
@@ -2288,12 +2325,11 @@ class Truck {
                 localZ = item.mesh.position.z;
                 localY = item.mesh.position.y;
             } else {
-                // Item is NOT parented - transform world to local
-                const dx = item.mesh.position.x - this.position.x;
-                const dz = item.mesh.position.z - this.position.z;
-                localX = dx * cos + dz * sin;
-                localZ = -dx * sin + dz * cos;
-                localY = item.mesh.position.y;
+                const worldVec = new BABYLON.Vector3(item.mesh.position.x, item.mesh.position.y, item.mesh.position.z);
+                const localVec = BABYLON.Vector3.TransformCoordinates(worldVec, invMatrix);
+                localX = localVec.x;
+                localZ = localVec.z;
+                localY = localVec.y;
             }
 
             // Update stored position
@@ -2308,7 +2344,7 @@ class Truck {
             const itemBottomY = item.mesh.position.y - halfY;
             const floorPenetration = this.floorTopY - itemBottomY;
 
-            if (!item.isParented && overBedFootprint && floorPenetration > 0.03) {
+            if (!item.isParented && overBedFootprint && floorPenetration > floorCorrectionTolerance) {
                 const correctedY = item.mesh.position.y + floorPenetration + 0.02;
                 item.mesh.position.y = correctedY;
                 item.localY = correctedY;
@@ -2353,7 +2389,7 @@ class Truck {
 
             // Left wall check: item's left edge should not go past -wallInnerX
             const itemLeftEdge = localX - halfX;
-            if (itemLeftEdge < -wallInnerX) {
+            if (itemLeftEdge < -wallInnerX - wallCorrectionTolerance) {
                 newLocalX = -wallInnerX + halfX + safeMargin;
                 correctedX = true;
                 console.warn(`⬅️ LEFT WALL BREACH: ${item.id || item.mesh.name}`,
@@ -2364,7 +2400,7 @@ class Truck {
 
             // Right wall check: item's right edge should not go past +wallInnerX
             const itemRightEdge = localX + halfX;
-            if (itemRightEdge > wallInnerX) {
+            if (itemRightEdge > wallInnerX + wallCorrectionTolerance) {
                 newLocalX = wallInnerX - halfX - safeMargin;
                 correctedX = true;
                 console.warn(`➡️ RIGHT WALL BREACH: ${item.id || item.mesh.name}`,
@@ -2375,7 +2411,7 @@ class Truck {
 
             // Front wall check: item's front edge should not go past wallInnerFrontZ
             const itemFrontEdge = localZ - halfZ;
-            if (itemFrontEdge < wallInnerFrontZ) {
+            if (itemFrontEdge < wallInnerFrontZ - wallCorrectionTolerance) {
                 newLocalZ = wallInnerFrontZ + halfZ + safeMargin;
                 correctedZ = true;
                 console.warn(`⬆️ FRONT WALL BREACH: ${item.id || item.mesh.name}`,
@@ -2386,7 +2422,7 @@ class Truck {
 
             // Back wall check: placed cargo should stay inside the rear edge
             const itemBackEdge = localZ + halfZ;
-            if (itemBackEdge > wallInnerBackZ) {
+            if (itemBackEdge > wallInnerBackZ + wallCorrectionTolerance) {
                 newLocalZ = wallInnerBackZ - halfZ - safeMargin;
                 correctedZ = true;
                 console.warn(`⬇️ BACK WALL BREACH: ${item.id || item.mesh.name}`,
@@ -2409,8 +2445,12 @@ class Truck {
                     // Y stays the same (localY)
                 } else {
                     // Non-parented item - calculate and set world position
-                    const worldX = this.position.x + newLocalX * cos - newLocalZ * sin;
-                    const worldZ = this.position.z + newLocalX * sin + newLocalZ * cos;
+                    const worldVec = BABYLON.Vector3.TransformCoordinates(
+                        new BABYLON.Vector3(newLocalX, localY, newLocalZ),
+                        worldMatrix
+                    );
+                    const worldX = worldVec.x;
+                    const worldZ = worldVec.z;
                     item.mesh.position.x = worldX;
                     item.mesh.position.z = worldZ;
 
@@ -2694,13 +2734,13 @@ class Truck {
             
             // Create physics aggregates with HIGH friction
             // Floor needs very high friction so items rotate WITH the truck
-            // Walls need low restitution so items don't bounce
+            // Walls need zero restitution so items don't bounce
             const physicsParts = [
-                { mesh: this.truckFloorMesh, friction: 15.0, restitution: 0.01, isWall: false },  // Floor: VERY high grip
-                { mesh: this.truckLeftWallMesh, friction: 5.0, restitution: 0.02, isWall: true }, // Walls: high friction, no bounce
-                { mesh: this.truckRightWallMesh, friction: 5.0, restitution: 0.02, isWall: true },
-                { mesh: this.truckFrontWallMesh, friction: 5.0, restitution: 0.02, isWall: true },
-                { mesh: this.truckBackWallMesh, friction: 5.0, restitution: 0.02, isWall: true }
+                { mesh: this.truckFloorMesh, friction: 12.0, restitution: 0.0, isWall: false },
+                { mesh: this.truckLeftWallMesh, friction: 5.0, restitution: 0.0, isWall: true },
+                { mesh: this.truckRightWallMesh, friction: 5.0, restitution: 0.0, isWall: true },
+                { mesh: this.truckFrontWallMesh, friction: 5.0, restitution: 0.0, isWall: true },
+                { mesh: this.truckBackWallMesh, friction: 5.0, restitution: 0.0, isWall: true }
             ];
             
             this.truckPhysicsAggregates = [];
@@ -2733,17 +2773,18 @@ class Truck {
                     this.scene
                 );
             
-                // Use KINEMATIC bodies for moving truck walls to avoid
-                // injecting large impulses into dynamic cargo items.
+                // Use ANIMATED bodies so moving truck parts have proper Havok
+                // velocity during contact with dynamic cargo.
                 if (aggregate.body && aggregate.body.setMotionType) {
-                    aggregate.body.setMotionType(BABYLON.PhysicsMotionType.KINEMATIC);
+                    aggregate.body.setMotionType(BABYLON.PhysicsMotionType.ANIMATED);
                 }
                 
                 // CRITICAL: Use larger collision margin for walls to create buffer zone
                 // This prevents fast-moving items from interpenetrating before collision response
                 if (aggregate.shape && aggregate.shape.setMargin) {
-                    // Use generous margins to avoid tunneling at high speed
-                    const margin = isWall ? 0.12 : 0.15; // floor gets extra thickness for reliable contact
+                    // The truck bodies are already thick; small margins avoid
+                    // inflated contacts that can launch cargo.
+                    const margin = isWall ? 0.06 : 0.04;
                     aggregate.shape.setMargin(margin);
                 }
                 
