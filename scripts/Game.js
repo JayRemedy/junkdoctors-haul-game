@@ -332,6 +332,7 @@ class Game {
         this.itemManager.clearAll();
         
         this.uiManager.hideStartScreen();
+        this.focusGameCanvas();
         this.uiManager.updateLevel(this.currentLevel);
         this.uiManager.reset();
         
@@ -353,6 +354,16 @@ class Game {
         this.audioManager.startEngine();
         
         // Debug collision boxes now toggle with '9' key
+    }
+
+    focusGameCanvas() {
+        if (!this.canvas) return;
+
+        if (!this.canvas.hasAttribute('tabindex')) {
+            this.canvas.setAttribute('tabindex', '0');
+        }
+
+        this.canvas.focus({ preventScroll: true });
     }
     
     update() {
@@ -754,4 +765,3 @@ class Game {
         this.uiManager.showStartScreen();
     }
 }
-

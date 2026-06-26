@@ -1160,32 +1160,64 @@ class Truck {
     // === DRIVING CONTROLS ===
     
     initDriving() {
+        const setDrivingKey = (event, isPressed) => {
+            if (this.isEditableInput(event.target)) return false;
+
+            const key = this.getDrivingKey(event);
+            if (!key) return false;
+
+            this.keys[key] = isPressed;
+            event.preventDefault();
+            return true;
+        };
+
         // Set up keyboard listeners
         window.addEventListener('keydown', (e) => {
-            const key = e.key.toLowerCase();
-            if (key === 'w') this.keys.w = true;
-            if (key === 'a') this.keys.a = true;
-            if (key === 's') this.keys.s = true;
-            if (key === 'd') this.keys.d = true;
-            if (key === ' ') this.keys.space = true;
-            if (e.code === 'Space') {
-                this.keys.space = true;
-                e.preventDefault();
-            }
+            setDrivingKey(e, true);
         });
         
         window.addEventListener('keyup', (e) => {
-            const key = e.key.toLowerCase();
-            if (key === 'w') this.keys.w = false;
-            if (key === 'a') this.keys.a = false;
-            if (key === 's') this.keys.s = false;
-            if (key === 'd') this.keys.d = false;
-            if (key === ' ') this.keys.space = false;
-            if (e.code === 'Space') {
-                this.keys.space = false;
-                e.preventDefault();
-            }
+            setDrivingKey(e, false);
         });
+
+        window.addEventListener('blur', () => this.resetDrivingKeys());
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) this.resetDrivingKeys();
+        });
+    }
+
+    getDrivingKey(event) {
+        const codeMap = {
+            KeyW: 'w',
+            KeyA: 'a',
+            KeyS: 's',
+            KeyD: 'd',
+            Space: 'space'
+        };
+        if (codeMap[event.code]) return codeMap[event.code];
+
+        const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+        if (key === 'w' || key === 'a' || key === 's' || key === 'd') return key;
+        if (key === ' ') return 'space';
+        return null;
+    }
+
+    isEditableInput(target) {
+        if (!target) return false;
+
+        const tagName = target.tagName;
+        return target.isContentEditable ||
+            tagName === 'INPUT' ||
+            tagName === 'TEXTAREA' ||
+            tagName === 'SELECT';
+    }
+
+    resetDrivingKeys() {
+        this.keys.w = false;
+        this.keys.a = false;
+        this.keys.s = false;
+        this.keys.d = false;
+        this.keys.space = false;
     }
     
     updateDriving(deltaTime, options = {}) {
