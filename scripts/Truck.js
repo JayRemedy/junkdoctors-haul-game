@@ -1285,8 +1285,10 @@ class Truck {
         // Clamp speed (forward is negative, reverse is positive and slower)
         this.speed = Math.max(-this.maxSpeed, Math.min(this.maxSpeed * 0.3, this.speed));
 
-        // Ensure auto-brake comes to a full stop once the timer ends
-        if (!autoBraking && this.autoBrakeTimer === 0 && Math.abs(this.speed) < 0.2) {
+        // Snap tiny residual speed to zero only while coasting.
+        // Active W/S input starts from tiny per-frame acceleration values.
+        const hasDrivingInput = effectiveKeys.w || effectiveKeys.s || effectiveKeys.space;
+        if (!hasDrivingInput && !autoBraking && this.autoBrakeTimer === 0 && Math.abs(this.speed) < 0.2) {
             this.speed = 0;
         }
         
