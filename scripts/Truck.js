@@ -618,7 +618,8 @@ class Truck {
             this.truckFloorMesh,
             this.truckLeftWallMesh,
             this.truckRightWallMesh,
-            this.truckFrontWallMesh
+            this.truckFrontWallMesh,
+            this.truckBackWallMesh
         ];
         physicsMeshes.forEach(mesh => {
             if (mesh) {
@@ -639,7 +640,7 @@ class Truck {
                 this.physicsDebugMeshes.forEach(mesh => mesh.dispose());
             }
 
-            const { wallHeight, sideWallThickness, frontWallThickness, backGap, floorDepth } = this.physicsWallConfig;
+            const { wallHeight, sideWallThickness, frontWallThickness, backWallThickness, backGap, floorDepth } = this.physicsWallConfig;
 
             const debugFloor = BABYLON.MeshBuilder.CreateBox('debugPhysicsFloor', {
                 width: this.cargoWidth + 0.2,
@@ -693,7 +694,21 @@ class Truck {
             debugFront.isPickable = false;
             debugFront.parent = this.root;
 
-            this.physicsDebugMeshes = [debugFloor, debugLeft, debugRight, debugFront];
+            const debugBack = BABYLON.MeshBuilder.CreateBox('debugPhysicsBackWall', {
+                width: this.cargoWidth + sideWallThickness * 2,
+                height: wallHeight,
+                depth: backWallThickness
+            }, this.scene);
+            debugBack.position.set(
+                0,
+                this.floorTopY + wallHeight / 2 - 0.5,
+                this.cargoLength / 2 + backWallThickness / 2
+            );
+            debugBack.material = this._physicsDebugMat;
+            debugBack.isPickable = false;
+            debugBack.parent = this.root;
+
+            this.physicsDebugMeshes = [debugFloor, debugLeft, debugRight, debugFront, debugBack];
         } else if (this.physicsDebugMeshes) {
             this.physicsDebugMeshes.forEach(mesh => mesh.dispose());
             this.physicsDebugMeshes = null;
@@ -1790,6 +1805,7 @@ class Truck {
 
                 const maxX = Math.max(0, this.cargoWidth / 2 - halfX - marginX);
                 const minZ = Math.min(0, -this.cargoLength / 2 + halfZ + marginZ);
+                const maxZ = Math.max(0, this.cargoLength / 2 - halfZ - marginZ);
 
                 let needsAdjust = false;
                 let safeLocalX = itemLocalVec.x;
@@ -1805,6 +1821,7 @@ class Truck {
                     if (safeLocalX > maxX) { safeLocalX = maxX; needsAdjust = true; }
                 }
                 if (safeLocalZ < minZ) { safeLocalZ = minZ; needsAdjust = true; }
+                if (safeLocalZ > maxZ) { safeLocalZ = maxZ; needsAdjust = true; }
 
                 if (needsAdjust) {
                     // Move item to safe position before creating physics
@@ -2167,7 +2184,7 @@ class Truck {
         // Wall positions (inner edge of cargo area)
         const wallInnerX = this.cargoWidth / 2;           // = 1.2m from center
         const wallInnerFrontZ = -this.cargoLength / 2;    // = -2.4m (cab side)
-        // Back is open for loading
+        const wallInnerBackZ = this.cargoLength / 2;       // = 2.4m (rear side)
         
         // Safety margin from walls
         const safeMargin = 0.1;  // 10cm safety margin
@@ -2357,6 +2374,17 @@ class Truck {
                 );
             }
 
+            // Back wall check: placed cargo should stay inside the rear edge
+            const itemBackEdge = localZ + halfZ;
+            if (itemBackEdge > wallInnerBackZ) {
+                newLocalZ = wallInnerBackZ - halfZ - safeMargin;
+                correctedZ = true;
+                console.warn(`⬇️ BACK WALL BREACH: ${item.id || item.mesh.name}`,
+                    `edge=${itemBackEdge.toFixed(2)} > wall=${wallInnerBackZ.toFixed(2)}`,
+                    `moving from ${localZ.toFixed(2)} to ${newLocalZ.toFixed(2)}`
+                );
+            }
+
             if (correctedX || correctedZ) {
                 // First, zero velocity to stop momentum (if physics body exists)
                 if (body) {
@@ -2381,6 +2409,11 @@ class Truck {
                         this.teleportItemBody(item, body, new BABYLON.Vector3(worldX, item.mesh.position.y, worldZ), quat, performance.now());
                     }
                 }
+
+                localX = newLocalX;
+                localZ = newLocalZ;
+                item.localX = newLocalX;
+                item.localZ = newLocalZ;
 
                 console.log(`📍 CORRECTED: ${item.id || item.mesh.name} to local(${newLocalX.toFixed(2)}, ${newLocalZ.toFixed(2)})`);
             }
@@ -2537,7 +2570,6 @@ class Truck {
     
     initPhysics() {
         // Create physics floor and walls for truck cargo area
-        // The walls form a U-shape (open at back for loading)
         if (!this.truckFloorMesh) {
             const wallHeight = this.cargoHeight + 1.5; // Extra height to prevent items flying over
             
@@ -2545,14 +2577,16 @@ class Truck {
             // At 60fps, 10 m/s = 0.167m per frame. 2m walls = 12 frames minimum to pass through
             const sideWallThickness = 2.0;  // 2m thick side walls
             const frontWallThickness = 2.0; // 2m thick front wall
+            const backWallThickness = 2.0;  // 2m thick rear wall
             
-            // Floor - extends full length, items can roll off the back naturally
-            const backGap = 0.0; // Keep full floor length; open back is handled by lack of wall
+            // Floor extends the full bed length; rear containment is handled by the back wall.
+            const backGap = 0.0;
             const floorDepth = this.cargoLength - backGap;
             this.physicsWallConfig = {
                 wallHeight,
                 sideWallThickness,
                 frontWallThickness,
+                backWallThickness,
                 backGap,
                 floorDepth
             };
@@ -2567,9 +2601,8 @@ class Truck {
             this.truckFloorMesh.isVisible = false;
             this.truckFloorMesh.isPickable = false;
             
-            // === U-SHAPED WALL CONFIGURATION ===
-            // Side walls extend the full length and connect to the front wall
-            // This creates a continuous barrier with no gaps
+            // === PHYSICS WALL CONFIGURATION ===
+            // Side walls extend the full length and connect with front/back walls.
             
             // Left wall - extends full cargo length (front to back)
             // Inner edge at -cargoWidth/2, outer edge at -(cargoWidth/2 + thickness)
@@ -2616,14 +2649,29 @@ class Truck {
             );
             this.truckFrontWallMesh.isVisible = false;
             this.truckFrontWallMesh.isPickable = false;
+
+            // Back wall (rear side) - keeps physics cargo in the bed after placement
+            this.truckBackWallMesh = BABYLON.MeshBuilder.CreateBox('truckPhysicsBackWall', {
+                width: frontWallWidth,
+                height: wallHeight,
+                depth: backWallThickness
+            }, this.scene);
+            this.truckBackWallMesh.position.set(
+                0,
+                this.floorTopY + wallHeight / 2 - 0.5,
+                this.cargoLength / 2 + backWallThickness / 2
+            );
+            this.truckBackWallMesh.isVisible = false;
+            this.truckBackWallMesh.isPickable = false;
             
             // Log wall configuration for debugging
             console.log('🚛 Truck physics walls initialized:');
             console.log(`   Cargo size: ${this.cargoWidth}m x ${this.cargoLength}m`);
-            console.log(`   Wall thickness: side=${sideWallThickness}m, front=${frontWallThickness}m`);
+            console.log(`   Wall thickness: side=${sideWallThickness}m, front=${frontWallThickness}m, back=${backWallThickness}m`);
             console.log(`   Left wall: localX=${this.truckLeftWallMesh.position.x.toFixed(2)} (inner edge at ${(-this.cargoWidth/2).toFixed(2)})`);
             console.log(`   Right wall: localX=${this.truckRightWallMesh.position.x.toFixed(2)} (inner edge at ${(this.cargoWidth/2).toFixed(2)})`);
             console.log(`   Front wall: localZ=${this.truckFrontWallMesh.position.z.toFixed(2)} (inner edge at ${(-this.cargoLength/2).toFixed(2)})`);
+            console.log(`   Back wall: localZ=${this.truckBackWallMesh.position.z.toFixed(2)} (inner edge at ${(this.cargoLength/2).toFixed(2)})`);
             
             // Parent all to a physics root that follows the truck (needed for transforms)
             this.physicsRoot = new BABYLON.TransformNode('truckPhysicsRoot', this.scene);
@@ -2632,6 +2680,7 @@ class Truck {
             this.truckLeftWallMesh.parent = this.physicsRoot;
             this.truckRightWallMesh.parent = this.physicsRoot;
             this.truckFrontWallMesh.parent = this.physicsRoot;
+            this.truckBackWallMesh.parent = this.physicsRoot;
             
             // Create physics aggregates with HIGH friction
             // Floor needs very high friction so items rotate WITH the truck
@@ -2640,7 +2689,8 @@ class Truck {
                 { mesh: this.truckFloorMesh, friction: 15.0, restitution: 0.01, isWall: false },  // Floor: VERY high grip
                 { mesh: this.truckLeftWallMesh, friction: 5.0, restitution: 0.02, isWall: true }, // Walls: high friction, no bounce
                 { mesh: this.truckRightWallMesh, friction: 5.0, restitution: 0.02, isWall: true },
-                { mesh: this.truckFrontWallMesh, friction: 5.0, restitution: 0.02, isWall: true }
+                { mesh: this.truckFrontWallMesh, friction: 5.0, restitution: 0.02, isWall: true },
+                { mesh: this.truckBackWallMesh, friction: 5.0, restitution: 0.02, isWall: true }
             ];
             
             this.truckPhysicsAggregates = [];
