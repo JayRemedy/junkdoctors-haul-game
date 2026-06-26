@@ -953,6 +953,8 @@ class ItemManager {
 
         const nowMs = performance.now();
         const physicsEnabled = this.game && this.game.physicsEnabled;
+        const baseLinearDamping = 5.0;
+        const baseAngularDamping = 10.0;
 
         let placedItem;
 
@@ -975,18 +977,22 @@ class ItemManager {
                 BABYLON.PhysicsShapeType.BOX,
                 {
                     mass: Math.max(1, itemDef.weight || 10),
-                    restitution: 0.05,
-                    friction: 0.9
+                    restitution: 0.0,
+                    friction: 1.2
                 },
                 this.scene
             );
             mesh.physicsAggregate = aggregate;
 
             if (aggregate.body) {
-                // Fully dynamic from the start for natural tipping/sliding
-                aggregate.body.setMotionType(BABYLON.PhysicsMotionType.DYNAMIC);
-                aggregate.body.setLinearDamping(0.15);
-                aggregate.body.setAngularDamping(0.05);
+                // Hold the item briefly at the preview position before enabling
+                // dynamics. This prevents a placement collision impulse from
+                // turning into visible bounce.
+                aggregate.body.setMotionType(BABYLON.PhysicsMotionType.KINEMATIC);
+                aggregate.body.setLinearVelocity(BABYLON.Vector3.Zero());
+                aggregate.body.setAngularVelocity(BABYLON.Vector3.Zero());
+                aggregate.body.setLinearDamping(30.0);
+                aggregate.body.setAngularDamping(40.0);
 
                 // Use default collide-all mask to avoid any filter mismatch
                 if (aggregate.body.setCollisionFilterMembership) {
@@ -1016,8 +1022,12 @@ class ItemManager {
                 localY: localY,
                 localZ: localZ,
                 localRotation: localRotation,
-                baseLinearDamping: 0.15,
-                baseAngularDamping: 0.05
+                baseLinearDamping,
+                baseAngularDamping,
+                becomeDynamicAt: nowMs + 250,
+                dampingBoostUntil: nowMs + 1800,
+                _dampingBoosted: true,
+                lockLateralUntil: nowMs + 900
             };
 
         } else {

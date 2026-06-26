@@ -1921,8 +1921,8 @@ class Truck {
 
                     // For the first 30 frames (~0.5s at 60fps), be VERY aggressive
                     if (item._dynamicFrame <= 30) {
-                        // Allow only gentle falling, zero everything else
-                        const allowedY = Math.max(vel.y, -2.0); // Max 2 m/s downward
+                        // Allow only gentle settling downward, never upward bounce
+                        const allowedY = Math.max(-2.0, Math.min(0, vel.y));
                         body.setLinearVelocity(new BABYLON.Vector3(0, allowedY, 0));
                         body.setAngularVelocity(BABYLON.Vector3.Zero());
                     } else if (horizontalSpeed > 1.0) {
