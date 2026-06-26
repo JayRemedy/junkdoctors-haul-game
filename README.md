@@ -2,6 +2,8 @@
 
 A 3D truck loading puzzle game built with Babylon.js for JunkDoctors.
 
+Play the live game: https://jayremedy.github.io/junkdoctors-haul-game/
+
 ## Overview
 
 Players drive a junk removal truck through a procedurally-generated city, picking up items from locations and delivering them to drop-off points. The goal is to load items efficiently while navigating the streets.
