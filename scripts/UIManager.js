@@ -76,6 +76,11 @@ class UIManager {
         this.elements.menuRestart?.addEventListener('click', () => { this.hideMenu(); this.game.restartLevel(); });
         this.elements.menuQuit?.addEventListener('click', () => { this.hideMenu(); this.game.quit(); });
         this.elements.menuPhysics?.addEventListener('click', () => { this.togglePhysicsMode(); });
+        this.elements.menuModal?.addEventListener('click', (e) => {
+            if (e.target !== this.elements.menuModal) return;
+            this.hideMenu();
+            this.game.resume();
+        });
         
         // Keyboard shortcut: M to toggle music
         window.addEventListener('keydown', (e) => {
