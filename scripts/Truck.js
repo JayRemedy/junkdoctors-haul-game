@@ -1742,16 +1742,34 @@ class Truck {
     }
 
     getUprightCargoRotation(item) {
-        const localYaw = item && Number.isFinite(item.localRotation) ? item.localRotation : 0;
+        const localYaw = item && Number.isFinite(item.cargoAnchorRotation)
+            ? item.cargoAnchorRotation
+            : (item && Number.isFinite(item.localRotation) ? item.localRotation : 0);
         return BABYLON.Quaternion.RotationYawPitchRoll(this.rotation + localYaw, 0, 0);
     }
 
-    keepCargoUpright(item, body, nowMs) {
+    getCargoAnchor(item) {
+        if (!item) return { x: 0, z: 0 };
+        if (!Number.isFinite(item.cargoAnchorX)) item.cargoAnchorX = Number.isFinite(item.localX) ? item.localX : 0;
+        if (!Number.isFinite(item.cargoAnchorZ)) item.cargoAnchorZ = Number.isFinite(item.localZ) ? item.localZ : 0;
+        if (!Number.isFinite(item.cargoAnchorRotation)) {
+            item.cargoAnchorRotation = Number.isFinite(item.localRotation) ? item.localRotation : 0;
+        }
+        return { x: item.cargoAnchorX, z: item.cargoAnchorZ };
+    }
+
+    stabilizeCargoInBed(item, body, localX, localZ, localY, dt, truckVelX, truckVelZ, worldMatrix, nowMs, hard = false) {
         if (!item || !item.mesh || !body || item.isFallen) return;
 
         if (body.setAngularVelocity) {
             body.setAngularVelocity(BABYLON.Vector3.Zero());
         }
+
+        const anchor = this.getCargoAnchor(item);
+        const driftX = localX - anchor.x;
+        const driftZ = localZ - anchor.z;
+        const drift = Math.sqrt(driftX * driftX + driftZ * driftZ);
+        const uprightQuat = this.getUprightCargoRotation(item);
 
         const quat = item.mesh.rotationQuaternion
             ? item.mesh.rotationQuaternion.clone()
@@ -1761,27 +1779,66 @@ class Truck {
                 item.mesh.rotation.z
             );
 
-        if (!this._cargoRotationMatrix) this._cargoRotationMatrix = new BABYLON.Matrix();
-        quat.toRotationMatrix(this._cargoRotationMatrix);
-        const up = BABYLON.Vector3.TransformNormal(BABYLON.Axis.Y, this._cargoRotationMatrix);
-        const tipRadians = Math.acos(Math.max(-1, Math.min(1, up.y)));
+        const quatDot = Math.abs(
+            quat.x * uprightQuat.x +
+            quat.y * uprightQuat.y +
+            quat.z * uprightQuat.z +
+            quat.w * uprightQuat.w
+        );
+        const rotationError = 2 * Math.acos(Math.max(-1, Math.min(1, quatDot)));
 
-        if (tipRadians <= 0.04) return;
+        if (!this._cargoAnchorLocalPos) this._cargoAnchorLocalPos = new BABYLON.Vector3();
+        if (!this._cargoAnchorWorldPos) this._cargoAnchorWorldPos = new BABYLON.Vector3();
+        this._cargoAnchorLocalPos.set(anchor.x, localY, anchor.z);
+        BABYLON.Vector3.TransformCoordinatesToRef(
+            this._cargoAnchorLocalPos,
+            worldMatrix,
+            this._cargoAnchorWorldPos
+        );
 
-        const uprightQuat = this.getUprightCargoRotation(item);
-        if (!item.mesh.rotationQuaternion) {
-            item.mesh.rotationQuaternion = uprightQuat.clone();
-        } else {
-            item.mesh.rotationQuaternion.copyFrom(uprightQuat);
+        const shouldSnap = hard || drift > 0.16 || rotationError > 0.003;
+
+        if (shouldSnap) {
+            item.mesh.position.x = this._cargoAnchorWorldPos.x;
+            item.mesh.position.z = this._cargoAnchorWorldPos.z;
+            if (!item.mesh.rotationQuaternion) {
+                item.mesh.rotationQuaternion = uprightQuat.clone();
+            } else {
+                item.mesh.rotationQuaternion.copyFrom(uprightQuat);
+            }
+            item.localX = anchor.x;
+            item.localZ = anchor.z;
+            item.localY = localY;
+
+            this.teleportItemBody(
+                item,
+                body,
+                new BABYLON.Vector3(this._cargoAnchorWorldPos.x, item.mesh.position.y, this._cargoAnchorWorldPos.z),
+                uprightQuat,
+                nowMs
+            );
+            return { localX: anchor.x, localZ: anchor.z, localY, corrected: true };
         }
 
-        this.teleportItemBody(
-            item,
-            body,
-            new BABYLON.Vector3(item.mesh.position.x, item.mesh.position.y, item.mesh.position.z),
-            uprightQuat,
-            nowMs
-        );
+        if (body.getLinearVelocity && body.setLinearVelocity && dt > 0) {
+            const vel = body.getLinearVelocity();
+            if (vel) {
+                const errorX = this._cargoAnchorWorldPos.x - item.mesh.position.x;
+                const errorZ = this._cargoAnchorWorldPos.z - item.mesh.position.z;
+                const error = Math.sqrt(errorX * errorX + errorZ * errorZ);
+                const correctionSpeed = Math.min(1.8, error * 14);
+                const correctionX = error > 0.0001 ? (errorX / error) * correctionSpeed : 0;
+                const correctionZ = error > 0.0001 ? (errorZ / error) * correctionSpeed : 0;
+                const vertical = Math.max(-0.35, Math.min(0.35, vel.y));
+                body.setLinearVelocity(new BABYLON.Vector3(
+                    truckVelX + correctionX,
+                    vertical,
+                    truckVelZ + correctionZ
+                ));
+            }
+        }
+
+        return { localX, localZ, localY, corrected: false };
     }
 
     applyCargoBedImpulse(item, body, localX, localZ, dt, truckVelX, truckVelZ) {
@@ -1850,9 +1907,9 @@ class Truck {
         const isTruckMoving = Math.abs(this.speed) > 0.5;
         
         // STRICT velocity limits - items should never move this fast relative to truck
-        const MAX_REL_LINEAR_VELOCITY = 4.0;   // m/s max relative motion
-        const MAX_ANGULAR_VELOCITY = 0.6;      // rad/s max spin
-        const MAX_VERTICAL_VELOCITY = 0.6;     // m/s max vertical bounce
+        const MAX_REL_LINEAR_VELOCITY = 1.5;   // m/s max relative motion
+        const MAX_ANGULAR_VELOCITY = 0.2;      // rad/s max spin
+        const MAX_VERTICAL_VELOCITY = 0.35;    // m/s max vertical bounce
 
         const truckVelX = dt > 0 ? (moveX / dt) : 0;
         const truckVelZ = dt > 0 ? (moveZ / dt) : 0;
@@ -2093,8 +2150,9 @@ class Truck {
             // Calculate local position using Babylon's inverse matrix
             const worldVec = new BABYLON.Vector3(item.mesh.position.x, item.mesh.position.y, item.mesh.position.z);
             const localVec = BABYLON.Vector3.TransformCoordinates(worldVec, invMatrix);
-            const localX = localVec.x;
-            const localZ = localVec.z;
+            let localX = localVec.x;
+            let localZ = localVec.z;
+            let localY = localVec.y;
 
             const halfX = item.size ? item.size.x / 2 : 0.3;
             const halfZ = item.size ? item.size.z / 2 : 0.3;
@@ -2104,7 +2162,23 @@ class Truck {
                 localZ <= this.cargoLength / 2 + halfZ * 0.5;
 
             if (body && overBedFootprint) {
-                this.keepCargoUpright(item, body, itemsNowMs);
+                const stabilized = this.stabilizeCargoInBed(
+                    item,
+                    body,
+                    localX,
+                    localZ,
+                    localY,
+                    dt,
+                    truckVelX,
+                    truckVelZ,
+                    worldMatrix,
+                    itemsNowMs
+                );
+                if (stabilized) {
+                    localX = stabilized.localX;
+                    localZ = stabilized.localZ;
+                    localY = stabilized.localY;
+                }
             }
 
             if (body && item.dampingBoostUntil && itemsNowMs < item.dampingBoostUntil && !isTruckMoving) {
@@ -2140,7 +2214,7 @@ class Truck {
             if (item.mesh.physicsAggregate) {
                 item.localX = localX;
                 item.localZ = localZ;
-                item.localY = item.mesh.position.y;
+                item.localY = localY;
             }
             
             // Cap every frame so collision impulses cannot build into visible bouncing.
@@ -2293,9 +2367,9 @@ class Truck {
         const floorY = this.floorTopY - 0.5;
         
         // Velocity limits - MUST match updateLoadedItems
-        const MAX_REL_LINEAR_VELOCITY = 4.0;
-        const MAX_ANGULAR_VELOCITY = 0.6;
-        const MAX_VERTICAL_VELOCITY = 0.6;
+        const MAX_REL_LINEAR_VELOCITY = 1.5;
+        const MAX_ANGULAR_VELOCITY = 0.2;
+        const MAX_VERTICAL_VELOCITY = 0.35;
 
         const truckVelX = this._truckWorldVelX || 0;
         const truckVelZ = this._truckWorldVelZ || 0;
@@ -2389,7 +2463,23 @@ class Truck {
                 localZ <= this.cargoLength / 2 + halfZ * 0.5;
 
             if (!item.isParented && body && overBedFootprint) {
-                this.keepCargoUpright(item, body, performance.now());
+                const stabilized = this.stabilizeCargoInBed(
+                    item,
+                    body,
+                    localX,
+                    localZ,
+                    localY,
+                    1 / 60,
+                    truckVelX,
+                    truckVelZ,
+                    worldMatrix,
+                    performance.now()
+                );
+                if (stabilized) {
+                    localX = stabilized.localX;
+                    localZ = stabilized.localZ;
+                    localY = stabilized.localY;
+                }
             }
 
             const itemBottomY = item.mesh.position.y - halfY;
