@@ -177,6 +177,10 @@ html, body {
     cursor: default;
     pointer-events: none;
 }
+.pickup-items-panel.at-pickup .queue-item {
+    cursor: pointer;
+    pointer-events: auto;
+}
 .pickup-items-panel .queue-item:hover,
 .pickup-items-panel .queue-item.holding {
     background: rgba(255, 255, 255, 0.06);
@@ -575,4 +579,3 @@ html, body {
     .pickup-hint { display: none !important; }
     .at-pickup-hint { display: none !important; }
 }
-
