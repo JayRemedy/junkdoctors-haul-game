@@ -67,13 +67,7 @@ class UIManager {
     
     bindEvents() {
         this.elements.btnStart?.addEventListener('click', () => {
-            // Check if a player profile is selected
-            if (!this.game.highScoreManager.playerId) {
-                this.game.highScoreManager.updateHint('Please select or create a player first', false);
-                return;
-            }
-            const level = this.game.highScoreManager.getSelectedLevel();
-            this.game.startAtLevel(level);
+            this.startSelectedLevel();
         });
         this.elements.btnMenu?.addEventListener('click', () => this.showMenu());
         this.elements.btnMusic?.addEventListener('click', () => this.toggleMusic());
@@ -93,14 +87,36 @@ class UIManager {
                 // Ignore Enter for 200ms after start screen is shown (prevents accidental restart after quit)
                 const timeSinceShown = Date.now() - this.startScreenShownAt;
                 if (startVisible && timeSinceShown > 200) {
-                    const level = this.game.highScoreManager.getSelectedLevel();
-                    this.game.startAtLevel(level);
+                    this.startSelectedLevel();
                 } else if (this.resultsVisible && this.resultsWin) {
                     this.hideResults();
                     this.game.nextLevel();
                 }
             }
         });
+    }
+
+    async startSelectedLevel() {
+        const highScores = this.game.highScoreManager;
+        if (!highScores.playerId) {
+            const input = highScores.elements?.usernameInput;
+            const newPlayerRow = highScores.elements?.newPlayerRow;
+            const isCreatingPlayer = newPlayerRow && !newPlayerRow.classList.contains('hidden');
+            const username = input?.value.trim();
+
+            if (isCreatingPlayer && username) {
+                await highScores.savePlayerFromInput();
+            }
+        }
+
+        if (!highScores.playerId) {
+            highScores.updateHint('Enter a name to play', false);
+            highScores.elements?.usernameInput?.focus();
+            return;
+        }
+
+        const level = highScores.getSelectedLevel();
+        this.game.startAtLevel(level);
     }
     
     toggleMusic() {
@@ -452,8 +468,32 @@ class UIManager {
                 <span class="queue-item-name">${item.name}${countText}</span>
                 <span class="queue-item-percent">${formatPercent(percent)}%</span>
             `;
+            el.addEventListener('click', () => this.pickupQueueItem(el));
             this.elements.queueItems.appendChild(el);
         });
+    }
+
+    pickupQueueItem(el) {
+        if (!el || el.classList.contains('placed')) return;
+
+        if (!this.game.isAtPickup) {
+            const pickupHint = document.getElementById('pickup-hint');
+            if (pickupHint) pickupHint.style.display = 'flex';
+            return;
+        }
+
+        const ids = JSON.parse(el.dataset.itemIds || '[]');
+        const itemManager = this.game.itemManager;
+        const placedIds = new Set(itemManager.placedItems.map(item => item.id));
+        const itemId = ids.find(id => !placedIds.has(id)) || el.dataset.itemId;
+        const groundItem = itemManager.groundItems.find(item => item.id === itemId);
+
+        if (!groundItem || itemManager.heldGroundItem) return;
+
+        this.elements.queueItems.querySelectorAll('.queue-item').forEach(item => {
+            item.classList.toggle('active', item === el);
+        });
+        itemManager.pickupGroundItem(groundItem);
     }
     
     selectQueueItem(itemId) {

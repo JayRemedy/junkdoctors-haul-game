@@ -1741,6 +1741,49 @@ class Truck {
         }
     }
 
+    getUprightCargoRotation(item) {
+        const localYaw = item && Number.isFinite(item.localRotation) ? item.localRotation : 0;
+        return BABYLON.Quaternion.RotationYawPitchRoll(this.rotation + localYaw, 0, 0);
+    }
+
+    keepCargoUpright(item, body, nowMs) {
+        if (!item || !item.mesh || !body || item.isFallen) return;
+
+        if (body.setAngularVelocity) {
+            body.setAngularVelocity(BABYLON.Vector3.Zero());
+        }
+
+        const quat = item.mesh.rotationQuaternion
+            ? item.mesh.rotationQuaternion.clone()
+            : BABYLON.Quaternion.RotationYawPitchRoll(
+                item.mesh.rotation.y,
+                item.mesh.rotation.x,
+                item.mesh.rotation.z
+            );
+
+        if (!this._cargoRotationMatrix) this._cargoRotationMatrix = new BABYLON.Matrix();
+        quat.toRotationMatrix(this._cargoRotationMatrix);
+        const up = BABYLON.Vector3.TransformNormal(BABYLON.Axis.Y, this._cargoRotationMatrix);
+        const tipRadians = Math.acos(Math.max(-1, Math.min(1, up.y)));
+
+        if (tipRadians <= 0.04) return;
+
+        const uprightQuat = this.getUprightCargoRotation(item);
+        if (!item.mesh.rotationQuaternion) {
+            item.mesh.rotationQuaternion = uprightQuat.clone();
+        } else {
+            item.mesh.rotationQuaternion.copyFrom(uprightQuat);
+        }
+
+        this.teleportItemBody(
+            item,
+            body,
+            new BABYLON.Vector3(item.mesh.position.x, item.mesh.position.y, item.mesh.position.z),
+            uprightQuat,
+            nowMs
+        );
+    }
+
     applyCargoBedImpulse(item, body, localX, localZ, dt, truckVelX, truckVelZ) {
         if (!item || !body || !body.getLinearVelocity || !body.applyImpulse || !dt) return;
         if (body.getMotionType && body.getMotionType() !== BABYLON.PhysicsMotionType.DYNAMIC) return;
@@ -1767,7 +1810,7 @@ class Truck {
 
         const massProps = body.getMassProperties ? body.getMassProperties() : null;
         const mass = Math.max(1, massProps && massProps.mass ? massProps.mass : (item.weight || 10));
-        const maxDeltaSpeed = 24.0 * dt;
+        const maxDeltaSpeed = 32.0 * dt;
         const impulseScale = Math.min(1, maxDeltaSpeed / relSpeed);
 
         if (!this._cargoBedImpulse) this._cargoBedImpulse = new BABYLON.Vector3();
@@ -1807,9 +1850,9 @@ class Truck {
         const isTruckMoving = Math.abs(this.speed) > 0.5;
         
         // STRICT velocity limits - items should never move this fast relative to truck
-        const MAX_REL_LINEAR_VELOCITY = 6.0;   // m/s max relative motion
-        const MAX_ANGULAR_VELOCITY = 1.6;      // rad/s max spin
-        const MAX_VERTICAL_VELOCITY = 1.4;     // m/s max vertical bounce
+        const MAX_REL_LINEAR_VELOCITY = 4.0;   // m/s max relative motion
+        const MAX_ANGULAR_VELOCITY = 0.6;      // rad/s max spin
+        const MAX_VERTICAL_VELOCITY = 0.6;     // m/s max vertical bounce
 
         const truckVelX = dt > 0 ? (moveX / dt) : 0;
         const truckVelZ = dt > 0 ? (moveZ / dt) : 0;
@@ -1999,7 +2042,15 @@ class Truck {
 
             // Items without physics OR still animated need to move with the truck
             // to stay in their local cargo position
-            if ((item.createPhysicsAt && item.createPhysicsAt > 0) || (item.becomeDynamicAt && item.becomeDynamicAt > 0)) {
+            const motionType = body && body.getMotionType ? body.getMotionType() : null;
+            const isTemporarilyAnimated = body &&
+                item._restoreMotionAt &&
+                itemsNowMs < item._restoreMotionAt &&
+                motionType === BABYLON.PhysicsMotionType.ANIMATED;
+
+            if ((item.createPhysicsAt && item.createPhysicsAt > 0) ||
+                (item.becomeDynamicAt && item.becomeDynamicAt > 0) ||
+                isTemporarilyAnimated) {
                 // Log to verify we're in settling mode
                 if (!item._loggedSkip) {
                     console.log(`⏳ SETTLING ${item.id} - moving with truck`);
@@ -2045,6 +2096,17 @@ class Truck {
             const localX = localVec.x;
             const localZ = localVec.z;
 
+            const halfX = item.size ? item.size.x / 2 : 0.3;
+            const halfZ = item.size ? item.size.z / 2 : 0.3;
+            const overBedFootprint =
+                Math.abs(localX) <= this.cargoWidth / 2 + halfX * 0.5 &&
+                localZ >= -this.cargoLength / 2 - halfZ * 0.5 &&
+                localZ <= this.cargoLength / 2 + halfZ * 0.5;
+
+            if (body && overBedFootprint) {
+                this.keepCargoUpright(item, body, itemsNowMs);
+            }
+
             if (body && item.dampingBoostUntil && itemsNowMs < item.dampingBoostUntil && !isTruckMoving) {
                 const boostedLinear = Math.max(item.baseLinearDamping || 3.0, 12.0);
                 const boostedAngular = Math.max(item.baseAngularDamping || 8.0, 18.0);
@@ -2081,11 +2143,7 @@ class Truck {
                 item.localY = item.mesh.position.y;
             }
             
-            // === AGGRESSIVE VELOCITY CAPPING ===
-            // This is the key to stability - don't let items build up crazy velocities
-            // MUST run every frame, not just when canLog
-            
-            // Debug: Log why cap might not run (once per item)
+            // Cap every frame so collision impulses cannot build into visible bouncing.
             if (!item._capDebugLogged) {
                 item._capDebugLogged = true;
                 console.log(`🔧 Cap check for ${item.id}: body=${!!body}, isFallen=${item.isFallen}, hasGetVel=${!!(body && body.getLinearVelocity)}, hasSetVel=${!!(body && body.setLinearVelocity)}`);
@@ -2100,7 +2158,6 @@ class Truck {
                         const relZ = vel.z - truckVelZ;
                         const relSpeed = Math.sqrt(relX * relX + relZ * relZ);
                         
-                        // ALWAYS cap if over limit - log every time for debugging
                         if (relSpeed > MAX_REL_LINEAR_VELOCITY) {
                             const scale = MAX_REL_LINEAR_VELOCITY / relSpeed;
                             const newVel = new BABYLON.Vector3(
@@ -2109,13 +2166,6 @@ class Truck {
                                 truckVelZ + relZ * scale
                             );
                             body.setLinearVelocity(newVel);
-                            
-                            // Verify it actually changed
-                            const verifyVel = body.getLinearVelocity();
-                            const verifyRelX = verifyVel ? verifyVel.x - truckVelX : 0;
-                            const verifyRelZ = verifyVel ? verifyVel.z - truckVelZ : 0;
-                            const verifySpeed = verifyVel ? Math.sqrt(verifyRelX * verifyRelX + verifyRelZ * verifyRelZ) : -1;
-                            console.warn(`🔴 PRE-PHYSICS CAP: ${item.id || item.mesh.name} rel ${relSpeed.toFixed(2)} -> ${MAX_REL_LINEAR_VELOCITY} (verify: ${verifySpeed.toFixed(2)})`);
                         } else if (Math.abs(vel.y) > MAX_VERTICAL_VELOCITY) {
                             body.setLinearVelocity(new BABYLON.Vector3(
                                 vel.x, 
@@ -2243,9 +2293,9 @@ class Truck {
         const floorY = this.floorTopY - 0.5;
         
         // Velocity limits - MUST match updateLoadedItems
-        const MAX_REL_LINEAR_VELOCITY = 6.0;
-        const MAX_ANGULAR_VELOCITY = 1.6;
-        const MAX_VERTICAL_VELOCITY = 1.4;
+        const MAX_REL_LINEAR_VELOCITY = 4.0;
+        const MAX_ANGULAR_VELOCITY = 0.6;
+        const MAX_VERTICAL_VELOCITY = 0.6;
 
         const truckVelX = this._truckWorldVelX || 0;
         const truckVelZ = this._truckWorldVelZ || 0;
@@ -2266,7 +2316,6 @@ class Truck {
             // This runs AFTER physics, so we catch any velocity added by collisions/forces
             if (body) {
                 let linearCapped = false;
-                let angularCapped = false;
                 
                 if (body.getLinearVelocity && body.setLinearVelocity) {
                     const vel = body.getLinearVelocity();
@@ -2283,7 +2332,6 @@ class Truck {
                             newVelX = truckVelX + relX * scale;
                             newVelZ = truckVelZ + relZ * scale;
                             linearCapped = true;
-                            console.warn(`⚡ POST-PHYSICS velocity cap: ${item.id || item.mesh.name} rel ${relSpeed.toFixed(2)} -> ${MAX_REL_LINEAR_VELOCITY}`);
                         }
                         if (Math.abs(vel.y) > MAX_VERTICAL_VELOCITY) {
                             newVelY = Math.sign(vel.y) * MAX_VERTICAL_VELOCITY;
@@ -2306,8 +2354,6 @@ class Truck {
                                 angVel.y * scale,
                                 angVel.z * scale
                             ));
-                            angularCapped = true;
-                            console.warn(`🔄 POST-PHYSICS angular cap: ${item.id || item.mesh.name} ${angSpeed.toFixed(2)} -> ${MAX_ANGULAR_VELOCITY}`);
                         }
                     }
                 }
@@ -2341,6 +2387,11 @@ class Truck {
                 Math.abs(localX) <= this.cargoWidth / 2 + halfX * 0.5 &&
                 localZ >= -this.cargoLength / 2 - halfZ * 0.5 &&
                 localZ <= this.cargoLength / 2 + halfZ * 0.5;
+
+            if (!item.isParented && body && overBedFootprint) {
+                this.keepCargoUpright(item, body, performance.now());
+            }
+
             const itemBottomY = item.mesh.position.y - halfY;
             const floorPenetration = this.floorTopY - itemBottomY;
 
