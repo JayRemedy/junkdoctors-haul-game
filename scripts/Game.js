@@ -10,6 +10,8 @@ class Game {
         this.isRunning = false;
         this.isPaused = false;
         this.currentLevel = 1;
+        this.urlLevelOverride = this.getUrlLevelOverride();
+        this.isUrlLevelOverrideActive = false;
         
         this.score = {
             spaceEfficiency: 0,
@@ -228,7 +230,13 @@ class Game {
             
             setTimeout(() => {
                 this.uiManager.hideLoadingScreen();
-                this.uiManager.showStartScreen();
+                if (this.urlLevelOverride) {
+                    this.isUrlLevelOverrideActive = true;
+                    console.log(`🧪 URL level override: starting level ${this.urlLevelOverride}`);
+                    this.startAtLevel(this.urlLevelOverride);
+                } else {
+                    this.uiManager.showStartScreen();
+                }
             }, 500);
             
         } catch (error) {
@@ -239,6 +247,17 @@ class Game {
     
     start() {
         this.startAtLevel(1);
+    }
+
+    getUrlLevelOverride() {
+        const params = new URLSearchParams(window.location.search);
+        const rawLevel = params.get('lvl');
+        if (!rawLevel || !/^\d+$/.test(rawLevel)) return null;
+
+        const level = Number(rawLevel);
+        if (!Number.isSafeInteger(level) || level < 1) return null;
+
+        return Math.min(level, 99);
     }
 
     initPerfOverlay() {
@@ -688,9 +707,11 @@ class Game {
     }
     
     completeLevel() {
-        // Save high score - they've reached the NEXT level by completing this one
-        const reachedLevel = this.currentLevel + 1;
-        this.highScoreManager.submitScore(reachedLevel, this.score.spaceEfficiency);
+        if (!this.isUrlLevelOverrideActive) {
+            // Save high score - they've reached the NEXT level by completing this one
+            const reachedLevel = this.currentLevel + 1;
+            this.highScoreManager.submitScore(reachedLevel, this.score.spaceEfficiency);
+        }
         
         this.uiManager.showResults(this.score, true);
         this.audioManager.playSound('complete');
