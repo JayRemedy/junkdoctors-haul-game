@@ -955,8 +955,8 @@ class ItemManager {
         const localY = placeY + physicsLift; // Small lift above floor
         const localRotation = placeRotation - this.truck.rotation;
 
-        const baseLinearDamping = 6.0;
-        const baseAngularDamping = 14.0;
+        const baseLinearDamping = 0.15;
+        const baseAngularDamping = 0.2;
 
         let placedItem;
 
@@ -980,7 +980,7 @@ class ItemManager {
                 {
                     mass: Math.max(1, itemDef.weight || 10),
                     restitution: 0.0,
-                    friction: 2.0
+                    friction: 0.85
                 },
                 this.scene
             );
@@ -997,8 +997,8 @@ class ItemManager {
                 aggregate.body.setMotionType(BABYLON.PhysicsMotionType.ANIMATED);
                 aggregate.body.setLinearVelocity(BABYLON.Vector3.Zero());
                 aggregate.body.setAngularVelocity(BABYLON.Vector3.Zero());
-                aggregate.body.setLinearDamping(30.0);
-                aggregate.body.setAngularDamping(40.0);
+                aggregate.body.setLinearDamping(baseLinearDamping);
+                aggregate.body.setAngularDamping(baseAngularDamping);
 
                 // Use default collide-all mask to avoid any filter mismatch
                 if (aggregate.body.setCollisionFilterMembership) {
@@ -1028,15 +1028,9 @@ class ItemManager {
                 localY: localY,
                 localZ: localZ,
                 localRotation: localRotation,
-                cargoAnchorX: localX,
-                cargoAnchorZ: localZ,
-                cargoAnchorRotation: localRotation,
                 baseLinearDamping,
                 baseAngularDamping,
-                becomeDynamicAt: nowMs + 250,
-                dampingBoostUntil: nowMs + 1800,
-                _dampingBoosted: true,
-                lockLateralUntil: nowMs + 900
+                becomeDynamicAt: nowMs + 250
             };
 
         } else {
