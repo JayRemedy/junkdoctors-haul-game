@@ -1444,6 +1444,7 @@ class Truck {
         // Store truck world velocity for relative item stabilization (m/s)
         this._truckWorldVelX = dt > 0 ? (moveX / dt) : 0;
         this._truckWorldVelZ = dt > 0 ? (moveZ / dt) : 0;
+        this._truckRotationRate = dt > 0 ? ((this.rotation - prevRotation) / dt) : 0;
         
         const newPosX = this.position.x + moveX;
         const newPosZ = this.position.z + moveZ;
@@ -2053,6 +2054,20 @@ class Truck {
             }
             
             if (body && !item.isFallen) {
+                if (item.wasPlacedAsleep && !item._wokeForTruckMotion && truckIsActivelyMoving) {
+                    const relX = item.mesh.position.x - this.position.x;
+                    const relZ = item.mesh.position.z - this.position.z;
+                    const wakeVelocity = new BABYLON.Vector3(
+                        truckVelX + rotationRate * relZ,
+                        0,
+                        truckVelZ - rotationRate * relX
+                    );
+
+                    body.setLinearVelocity(wakeVelocity);
+                    body.setAngularVelocity(BABYLON.Vector3.Zero());
+                    item._wokeForTruckMotion = true;
+                }
+
                 if (body.getLinearVelocity && body.setLinearVelocity) {
                     const vel = body.getLinearVelocity();
                     if (vel) {

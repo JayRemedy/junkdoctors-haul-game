@@ -83,6 +83,77 @@ class ItemManager {
         body._ccdConfigured = true;
     }
 
+    _getTruckPointVelocity(localX = 0, localZ = 0) {
+        const truckVelX = this.truck?._truckWorldVelX || 0;
+        const truckVelZ = this.truck?._truckWorldVelZ || 0;
+        const rotationRate = this.truck?._truckRotationRate || 0;
+
+        if (!this.truck?.root || Math.abs(rotationRate) < 0.001) {
+            return new BABYLON.Vector3(truckVelX, 0, truckVelZ);
+        }
+
+        this.truck.root.computeWorldMatrix(true);
+        const pointWorld = BABYLON.Vector3.TransformCoordinates(
+            new BABYLON.Vector3(localX, 0, localZ),
+            this.truck.root.getWorldMatrix()
+        );
+        const relX = pointWorld.x - this.truck.position.x;
+        const relZ = pointWorld.z - this.truck.position.z;
+
+        return new BABYLON.Vector3(
+            truckVelX + rotationRate * relZ,
+            0,
+            truckVelZ - rotationRate * relX
+        );
+    }
+
+    configurePlacedPhysicsBody(body, itemDef, boxSize, truckMovingAtPlacement, localX = 0, localZ = 0) {
+        if (!body) return;
+
+        const mass = Math.max(1, itemDef.weight || 10);
+        if (body.getMassProperties && body.setMassProperties) {
+            const massProps = body.getMassProperties();
+            const minFootprint = Math.max(0.001, Math.min(boxSize.x, boxSize.z));
+            const tallRatio = boxSize.y / minFootprint;
+            const shouldLowerCom = itemDef.type !== 'box' && tallRatio > 1.15;
+            const inertia = massProps.inertia || BABYLON.Vector3.Zero();
+            const isFurniture = itemDef.type !== 'box';
+            const inertiaScale = isFurniture ? (shouldLowerCom ? 8.0 : 4.0) : 1.0;
+
+            body.setMassProperties({
+                mass,
+                centerOfMass: shouldLowerCom
+                    ? new BABYLON.Vector3(0, -Math.min(boxSize.y * 0.28, 0.3), 0)
+                    : (massProps.centerOfMass || BABYLON.Vector3.Zero()),
+                inertia: new BABYLON.Vector3(
+                    inertia.x * inertiaScale,
+                    inertia.y * inertiaScale,
+                    inertia.z * inertiaScale
+                ),
+                inertiaOrientation: massProps.inertiaOrientation || BABYLON.Quaternion.Identity()
+            });
+        }
+
+        body.setLinearVelocity(BABYLON.Vector3.Zero());
+        body.setAngularVelocity(BABYLON.Vector3.Zero());
+        body.setLinearDamping(0.45);
+        body.setAngularDamping(0.8);
+
+        if (truckMovingAtPlacement) {
+            body.setLinearVelocity(this._getTruckPointVelocity(localX, localZ));
+        }
+
+        // Use default collide-all mask to avoid any filter mismatch.
+        if (body.setCollisionFilterMembership) {
+            body.setCollisionFilterMembership(1);
+        }
+        if (body.setCollisionFilterCollideMask) {
+            body.setCollisionFilterCollideMask(~0 >>> 0);
+        }
+
+        this.applyCcdSettings(body, boxSize);
+    }
+
     _worldToTruckLocalXZ(worldX, worldZ) {
         // Use Babylon's matrix for accurate transformation
         // CRITICAL: Sync root transform with truck's current position/rotation first
@@ -944,7 +1015,6 @@ class ItemManager {
         mat.roughness = 0.8;
         mesh.material = mat;
 
-        const nowMs = performance.now();
         const physicsEnabled = this.game && this.game.physicsEnabled;
         const physicsLift = physicsEnabled ? 0.005 : 0.02;
 
@@ -955,8 +1025,8 @@ class ItemManager {
         const localY = placeY + physicsLift; // Small lift above floor
         const localRotation = placeRotation - this.truck.rotation;
 
-        const baseLinearDamping = 0.15;
-        const baseAngularDamping = 0.2;
+        const baseLinearDamping = 0.45;
+        const baseAngularDamping = 0.8;
         const truckMovingAtPlacement = this.truck && (
             Math.abs(this.truck.speed || 0) > 0.5 ||
             this.truck.keys?.w ||
@@ -964,7 +1034,6 @@ class ItemManager {
             this.truck.keys?.a ||
             this.truck.keys?.d
         );
-        const placementSettleMs = truckMovingAtPlacement ? 50 : 300;
 
         let placedItem;
 
@@ -988,7 +1057,8 @@ class ItemManager {
                 {
                     mass: Math.max(1, itemDef.weight || 10),
                     restitution: 0.0,
-                    friction: 1.0
+                    friction: itemDef.type === 'box' ? 1.0 : 1.4,
+                    startAsleep: !truckMovingAtPlacement
                 },
                 this.scene
             );
@@ -999,28 +1069,7 @@ class ItemManager {
             }
 
             if (aggregate.body) {
-                // Hold the item briefly at the preview position before enabling
-                // dynamics. This prevents a placement collision impulse from
-                // turning into visible bounce.
-                aggregate.body.setMotionType(BABYLON.PhysicsMotionType.ANIMATED);
-                if (aggregate.body.setPrestepType && BABYLON.PhysicsPrestepType) {
-                    aggregate.body.setPrestepType(BABYLON.PhysicsPrestepType.TELEPORT);
-                }
-                aggregate.body.setLinearVelocity(BABYLON.Vector3.Zero());
-                aggregate.body.setAngularVelocity(BABYLON.Vector3.Zero());
-                aggregate.body.setLinearDamping(baseLinearDamping);
-                aggregate.body.setAngularDamping(baseAngularDamping);
-
-                // Use default collide-all mask to avoid any filter mismatch
-                if (aggregate.body.setCollisionFilterMembership) {
-                    aggregate.body.setCollisionFilterMembership(1);
-                }
-                if (aggregate.body.setCollisionFilterCollideMask) {
-                    aggregate.body.setCollisionFilterCollideMask(~0 >>> 0); // all bits
-                }
-
-                // Enable CCD to stop tunneling through floor/walls
-                this.applyCcdSettings(aggregate.body, boxSize);
+                this.configurePlacedPhysicsBody(aggregate.body, itemDef, boxSize, truckMovingAtPlacement, localX, localZ);
             }
 
             console.log(`📦 PLACED ITEM ${itemDef.id} (PHYSICS): World=(${placeX.toFixed(2)}, ${placeY.toFixed(2)}, ${placeZ.toFixed(2)})`);
@@ -1039,14 +1088,11 @@ class ItemManager {
                 localY: localY,
                 localZ: localZ,
                 localRotation: localRotation,
-                settleStartedAt: nowMs,
-                settleLocalX: localX,
-                settleLocalY: localY,
-                settleLocalZ: localZ,
-                placementSettleMs,
                 baseLinearDamping,
                 baseAngularDamping,
-                becomeDynamicAt: nowMs + placementSettleMs
+                becomeDynamicAt: 0,
+                wasPlacedAsleep: !truckMovingAtPlacement,
+                _wokeForTruckMotion: truckMovingAtPlacement
             };
 
         } else {
