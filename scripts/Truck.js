@@ -640,7 +640,8 @@ class Truck {
                 this.physicsDebugMeshes.forEach(mesh => mesh.dispose());
             }
 
-            const { wallHeight, sideWallThickness, frontWallThickness, backWallThickness, backGap, floorDepth } = this.physicsWallConfig;
+            const { wallHeight, sideWallThickness, frontWallThickness, backWallThickness, backGap, floorDepth, wallFloorOverlap = 0 } = this.physicsWallConfig;
+            const wallCenterY = this.floorTopY - wallFloorOverlap + wallHeight / 2;
 
             const debugFloor = BABYLON.MeshBuilder.CreateBox('debugPhysicsFloor', {
                 width: this.cargoWidth + 0.2,
@@ -659,7 +660,7 @@ class Truck {
             }, this.scene);
             debugLeft.position.set(
                 -this.cargoWidth / 2 - sideWallThickness / 2,
-                this.floorTopY + wallHeight / 2,
+                wallCenterY,
                 0
             );
             debugLeft.material = this._physicsDebugMat;
@@ -673,7 +674,7 @@ class Truck {
             }, this.scene);
             debugRight.position.set(
                 this.cargoWidth / 2 + sideWallThickness / 2,
-                this.floorTopY + wallHeight / 2,
+                wallCenterY,
                 0
             );
             debugRight.material = this._physicsDebugMat;
@@ -687,7 +688,7 @@ class Truck {
             }, this.scene);
             debugFront.position.set(
                 0,
-                this.floorTopY + wallHeight / 2,
+                wallCenterY,
                 -this.cargoLength / 2 - frontWallThickness / 2
             );
             debugFront.material = this._physicsDebugMat;
@@ -701,7 +702,7 @@ class Truck {
             }, this.scene);
             debugBack.position.set(
                 0,
-                this.floorTopY + wallHeight / 2,
+                wallCenterY,
                 this.cargoLength / 2 + backWallThickness / 2
             );
             debugBack.material = this._physicsDebugMat;
@@ -1720,6 +1721,9 @@ class Truck {
         // CRITICAL: Zero velocities before restoring to prevent explosion
         if (body.setLinearVelocity) body.setLinearVelocity(BABYLON.Vector3.Zero());
         if (body.setAngularVelocity) body.setAngularVelocity(BABYLON.Vector3.Zero());
+        if (body.setPrestepType && BABYLON.PhysicsPrestepType && restoreType === BABYLON.PhysicsMotionType.DYNAMIC) {
+            body.setPrestepType(BABYLON.PhysicsPrestepType.DISABLED);
+        }
         body.setMotionType(restoreType);
         item._restoreMotionAt = 0;
         item._restoreMotionType = null;
@@ -1732,6 +1736,9 @@ class Truck {
         // Use ANIMATED to move the body explicitly while it settles.
         item._restoreMotionAt = nowMs + 150;
         body.setMotionType(BABYLON.PhysicsMotionType.ANIMATED);
+        if (body.setPrestepType && BABYLON.PhysicsPrestepType) {
+            body.setPrestepType(BABYLON.PhysicsPrestepType.TELEPORT);
+        }
         // Zero velocities immediately
         if (body.setLinearVelocity) body.setLinearVelocity(BABYLON.Vector3.Zero());
         if (body.setAngularVelocity) body.setAngularVelocity(BABYLON.Vector3.Zero());
@@ -1739,6 +1746,26 @@ class Truck {
         if (body.setTargetTransform) {
             body.setTargetTransform(position, rotation);
         }
+    }
+
+    getSettledItemPose(item, worldMatrix) {
+        const localX = item.settleLocalX ?? item.localX ?? 0;
+        const localY = item.settleLocalY ?? item.localY ?? item.mesh.position.y;
+        const localZ = item.settleLocalZ ?? item.localZ ?? 0;
+        const position = BABYLON.Vector3.TransformCoordinates(
+            new BABYLON.Vector3(localX, localY, localZ),
+            worldMatrix
+        );
+
+        const truckQuat = BABYLON.Quaternion.RotationYawPitchRoll(this.rotation, 0, 0);
+        const localQuat = item.localQuat
+            ? item.localQuat
+            : BABYLON.Quaternion.RotationYawPitchRoll(item.localRotation || 0, 0, 0);
+
+        return {
+            position,
+            rotation: truckQuat.multiply(localQuat)
+        };
     }
 
     updateLoadedItems(dt, moveX, moveZ, rotationDelta) {
@@ -1764,6 +1791,15 @@ class Truck {
 
         const truckVelX = dt > 0 ? (moveX / dt) : 0;
         const truckVelZ = dt > 0 ? (moveZ / dt) : 0;
+        const truckMotionSpeed = Math.sqrt(truckVelX * truckVelX + truckVelZ * truckVelZ);
+        const rotationRate = dt > 0 ? rotationDelta / dt : 0;
+        const truckIsActivelyMoving =
+            truckMotionSpeed > 0.2 ||
+            Math.abs(rotationRate) > 0.05 ||
+            this.keys.w ||
+            this.keys.s ||
+            this.keys.a ||
+            this.keys.d;
         
         let riskLines = [];
         const diagNowMs = performance.now();
@@ -1850,12 +1886,15 @@ class Truck {
                 item.mesh.physicsAggregate = aggregate;
 
                 if (aggregate.shape && aggregate.shape.setMargin) {
-                    aggregate.shape.setMargin(0.02);
+                    aggregate.shape.setMargin(0.01);
                 }
 
                 if (aggregate.body) {
                     // Hold as ANIMATED until the item can be released cleanly.
                     aggregate.body.setMotionType(BABYLON.PhysicsMotionType.ANIMATED);
+                    if (aggregate.body.setPrestepType && BABYLON.PhysicsPrestepType) {
+                        aggregate.body.setPrestepType(BABYLON.PhysicsPrestepType.TELEPORT);
+                    }
 
                     // Zero velocities
                     aggregate.body.setLinearVelocity(BABYLON.Vector3.Zero());
@@ -1881,26 +1920,65 @@ class Truck {
             }
 
             // Transition from animated placement hold to DYNAMIC after physics creation.
-            if (body && item.becomeDynamicAt && itemsNowMs >= item.becomeDynamicAt) {
-                const releaseVelocity = new BABYLON.Vector3(truckVelX, 0, truckVelZ);
-                // Match the truck's current world velocity at release. This is
-                // the physical initial condition for cargo that was resting on
-                // the moving bed, and avoids a wall-slam impulse.
-                body.setLinearVelocity(releaseVelocity);
-                body.setAngularVelocity(BABYLON.Vector3.Zero());
+            // Preserve the intended local bed pose until this moment; reading the
+            // animated body's lagging position can turn the settle phase into a launch.
+            if (body && item.becomeDynamicAt) {
+                const settleAgeMs = item.settleStartedAt ? itemsNowMs - item.settleStartedAt : Infinity;
+                const movingReleaseReady = truckIsActivelyMoving && settleAgeMs >= 50;
+                const timedReleaseReady = itemsNowMs >= item.becomeDynamicAt;
 
-                // Transition to DYNAMIC
-                body.setMotionType(BABYLON.PhysicsMotionType.DYNAMIC);
+                if (!movingReleaseReady && !timedReleaseReady) {
+                    // Let the settle block below keep driving the target transform.
+                } else {
+                    const pose = this.getSettledItemPose(item, worldMatrix);
+                    item.mesh.position.copyFrom(pose.position);
+                    if (!item.mesh.rotationQuaternion) {
+                        item.mesh.rotationQuaternion = pose.rotation.clone();
+                    } else {
+                        item.mesh.rotationQuaternion.copyFrom(pose.rotation);
+                    }
+                    item.mesh.computeWorldMatrix(true);
 
-                // Re-apply after motion-type change; Havok may reset velocity.
-                body.setLinearVelocity(releaseVelocity);
-                body.setAngularVelocity(BABYLON.Vector3.Zero());
+                    if (body.setTargetTransform) {
+                        body.setTargetTransform(pose.position, pose.rotation);
+                    }
+                    if (body.setPrestepType && BABYLON.PhysicsPrestepType) {
+                        body.setPrestepType(BABYLON.PhysicsPrestepType.DISABLED);
+                    }
 
-                body.setLinearDamping(item.baseLinearDamping || 0.35);
-                body.setAngularDamping(item.baseAngularDamping || 0.45);
+                    const relX = pose.position.x - this.position.x;
+                    const relZ = pose.position.z - this.position.z;
+                    const releaseVelocity = new BABYLON.Vector3(
+                        truckVelX + rotationRate * relZ,
+                        0,
+                        truckVelZ - rotationRate * relX
+                    );
 
-                item.becomeDynamicAt = 0;
-                console.log(`✅ ${item.id} now DYNAMIC`);
+                    // Match the truck's current world velocity at release. This is
+                    // the physical initial condition for cargo that was resting on
+                    // the moving bed, and avoids a wall-slam impulse.
+                    body.setLinearVelocity(releaseVelocity);
+                    body.setAngularVelocity(BABYLON.Vector3.Zero());
+
+                    // Transition to DYNAMIC
+                    body.setMotionType(BABYLON.PhysicsMotionType.DYNAMIC);
+
+                    // Re-apply after motion-type change; Havok may reset velocity.
+                    body.setLinearVelocity(releaseVelocity);
+                    body.setAngularVelocity(BABYLON.Vector3.Zero());
+
+                    body.setLinearDamping(item.baseLinearDamping || 0.35);
+                    body.setAngularDamping(item.baseAngularDamping || 0.45);
+
+                    item.localX = item.settleLocalX ?? item.localX;
+                    item.localY = item.settleLocalY ?? item.localY;
+                    item.localZ = item.settleLocalZ ?? item.localZ;
+                    item.settleLocalX = null;
+                    item.settleLocalY = null;
+                    item.settleLocalZ = null;
+                    item.becomeDynamicAt = 0;
+                    console.log(`✅ ${item.id} now DYNAMIC`);
+                }
             }
 
             // Items without physics OR still animated need to move with the truck
@@ -1924,10 +2002,12 @@ class Truck {
                 // This prevents items from being left behind when truck moves during settling
                 if (item.localX !== undefined && item.localZ !== undefined) {
                     // Use Babylon's matrix for local-to-world transformation
-                    const localVec = new BABYLON.Vector3(item.localX, item.mesh.position.y, item.localZ);
+                    const targetLocalX = item.settleLocalX ?? item.localX;
+                    const targetLocalY = item.settleLocalY ?? item.localY ?? item.mesh.position.y;
+                    const targetLocalZ = item.settleLocalZ ?? item.localZ;
+                    const localVec = new BABYLON.Vector3(targetLocalX, targetLocalY, targetLocalZ);
                     const worldVec = BABYLON.Vector3.TransformCoordinates(localVec, worldMatrix);
-                    item.mesh.position.x = worldVec.x;
-                    item.mesh.position.z = worldVec.z;
+                    item.mesh.position.copyFrom(worldVec);
 
                     // Also update rotation using localQuat (stored in addLoadedItem)
                     if (item.localQuat) {
@@ -1939,6 +2019,7 @@ class Truck {
                             item.mesh.rotationQuaternion.copyFrom(worldQuat);
                         }
                     }
+                    item.mesh.computeWorldMatrix(true);
 
                     // If body exists (kinematic phase), update its transform too
                     if (body) {
@@ -1946,7 +2027,7 @@ class Truck {
                         if (!this._settleTargetPos) {
                             this._settleTargetPos = new BABYLON.Vector3();
                         }
-                        this._settleTargetPos.set(item.mesh.position.x, item.mesh.position.y, item.mesh.position.z);
+                        this._settleTargetPos.set(worldVec.x, worldVec.y, worldVec.z);
                         body.setTargetTransform(this._settleTargetPos, quat);
                     }
                 }
@@ -1962,6 +2043,7 @@ class Truck {
 
             const halfX = item.size ? item.size.x / 2 : 0.3;
             const halfZ = item.size ? item.size.z / 2 : 0.3;
+            const halfY = item.size ? item.size.y / 2 : 0.3;
 
             // Update local position tracking
             if (item.mesh.physicsAggregate) {
@@ -1974,6 +2056,33 @@ class Truck {
                 if (body.getLinearVelocity && body.setLinearVelocity) {
                     const vel = body.getLinearVelocity();
                     if (vel) {
+                        const overCargoFootprint =
+                            Math.abs(localX) <= this.cargoWidth / 2 + halfX &&
+                            localZ >= -this.cargoLength / 2 - halfZ &&
+                            localZ <= this.cargoLength / 2 + halfZ;
+
+                        if (overCargoFootprint) {
+                            const maxUpVelocity = 1.2;
+                            const cargoSoftCeilingY = this.floorTopY + this.cargoHeight + halfY;
+                            let guardedVel = null;
+
+                            if (vel.y > maxUpVelocity) {
+                                guardedVel = new BABYLON.Vector3(vel.x, maxUpVelocity, vel.z);
+                            }
+
+                            if (item.mesh.position.y > cargoSoftCeilingY) {
+                                const downwardY = Math.min(guardedVel ? guardedVel.y : vel.y, -2.0);
+                                guardedVel = new BABYLON.Vector3(vel.x, downwardY, vel.z);
+                            }
+
+                            if (guardedVel) {
+                                body.setLinearVelocity(guardedVel);
+                                vel.x = guardedVel.x;
+                                vel.y = guardedVel.y;
+                                vel.z = guardedVel.z;
+                            }
+                        }
+
                         const speed = Math.sqrt(vel.x * vel.x + vel.y * vel.y + vel.z * vel.z);
                         if (speed > maxSafeVelocity) {
                             const scale = maxSafeVelocity / speed;
@@ -1985,8 +2094,10 @@ class Truck {
                     const angVel = body.getAngularVelocity();
                     if (angVel) {
                         const angSpeed = Math.sqrt(angVel.x * angVel.x + angVel.y * angVel.y + angVel.z * angVel.z);
-                        if (angSpeed > maxSafeAngularVelocity) {
-                            const scale = maxSafeAngularVelocity / angSpeed;
+                        const airborne = item.mesh.position.y > this.floorTopY + halfY + 0.25;
+                        const angularLimit = airborne ? 8 : maxSafeAngularVelocity;
+                        if (angSpeed > angularLimit) {
+                            const scale = angularLimit / angSpeed;
                             body.setAngularVelocity(new BABYLON.Vector3(
                                 angVel.x * scale,
                                 angVel.y * scale,
@@ -2087,18 +2198,22 @@ class Truck {
         const outerFrontZ = -this.cargoLength / 2 - 1.0;
         const outerBackZ = this.cargoLength / 2 + 2.0;
         const floorY = this.floorTopY - 0.5;
+        const nowMs = performance.now();
         
         for (let i = 0; i < this.loadedItems.length; i++) {
             const item = this.loadedItems[i];
             if (!item.mesh || item.isFallen) continue;
 
-            // Skip items that don't have physics yet (still settling)
-            if (item.createPhysicsAt && item.createPhysicsAt > 0) {
+            // Skip items that don't have physics yet or are in the placement
+            // handoff. Their intended local pose is owned by updateLoadedItems
+            // until they become dynamic.
+            if ((item.createPhysicsAt && item.createPhysicsAt > 0) ||
+                (item.becomeDynamicAt && item.becomeDynamicAt > 0)) {
                 continue;
             }
 
             const body = item.mesh.physicsAggregate && item.mesh.physicsAggregate.body;
-            this.restoreItemMotionType(item, body, performance.now());
+            this.restoreItemMotionType(item, body, nowMs);
             
             const halfX = item.size ? item.size.x / 2 : 0.3;
             const halfZ = item.size ? item.size.z / 2 : 0.3;
@@ -2144,7 +2259,7 @@ class Truck {
                         body,
                         new BABYLON.Vector3(item.mesh.position.x, correctedY, item.mesh.position.z),
                         quat,
-                        performance.now()
+                        nowMs
                     );
                 }
 
@@ -2309,6 +2424,7 @@ class Truck {
                 mesh.rotationQuaternion = BABYLON.Quaternion.Identity();
             }
             mesh.rotationQuaternion.copyFrom(this._physicsRotQuat);
+            mesh.computeWorldMatrix(true);
             
             // IMPORTANT: For moving bodies, set the target transform on the physics body
             this._physicsTargetPos.set(worldVec.x, worldVec.y, worldVec.z);
@@ -2326,6 +2442,7 @@ class Truck {
             const sideWallThickness = 2.0;  // 2m thick side walls
             const frontWallThickness = 2.0; // 2m thick front wall
             const backWallThickness = 2.0;  // 2m thick rear wall
+            const wallFloorOverlap = 0.15;
             
             // Floor extends the full bed length; rear containment is handled by the back wall.
             const backGap = 0.0;
@@ -2336,8 +2453,10 @@ class Truck {
                 frontWallThickness,
                 backWallThickness,
                 backGap,
-                floorDepth
+                floorDepth,
+                wallFloorOverlap
             };
+            const wallCenterY = this.floorTopY - wallFloorOverlap + wallHeight / 2;
             const floorThickness = 0.5; // Match visual floor thickness for perfect overlap
             this.truckFloorMesh = BABYLON.MeshBuilder.CreateBox('truckPhysicsFloor', {
                 width: this.cargoWidth + 0.2,  // Slightly wider than cargo for edge grip
@@ -2361,7 +2480,7 @@ class Truck {
             }, this.scene);
             this.truckLeftWallMesh.position.set(
                 -this.cargoWidth / 2 - sideWallThickness / 2,  // Outside the cargo area
-                this.floorTopY + wallHeight / 2,
+                wallCenterY,
                 0  // Centered on truck
             );
             this.truckLeftWallMesh.isVisible = false;
@@ -2375,7 +2494,7 @@ class Truck {
             }, this.scene);
             this.truckRightWallMesh.position.set(
                 this.cargoWidth / 2 + sideWallThickness / 2,  // Outside the cargo area
-                this.floorTopY + wallHeight / 2,
+                wallCenterY,
                 0  // Centered on truck
             );
             this.truckRightWallMesh.isVisible = false;
@@ -2392,7 +2511,7 @@ class Truck {
             // Position at front of cargo area (negative Z = toward cab)
             this.truckFrontWallMesh.position.set(
                 0, 
-                this.floorTopY + wallHeight / 2,
+                wallCenterY,
                 -this.cargoLength / 2 - frontWallThickness / 2  // Front (cab side)
             );
             this.truckFrontWallMesh.isVisible = false;
@@ -2406,7 +2525,7 @@ class Truck {
             }, this.scene);
             this.truckBackWallMesh.position.set(
                 0,
-                this.floorTopY + wallHeight / 2,
+                wallCenterY,
                 this.cargoLength / 2 + backWallThickness / 2
             );
             this.truckBackWallMesh.isVisible = false;
@@ -2433,15 +2552,15 @@ class Truck {
             // Create moving truck bodies. Contact friction now handles cargo
             // motion; cargo is not pinned or orientation-locked in physics mode.
             const physicsParts = [
-                { mesh: this.truckFloorMesh, friction: 0.9, restitution: 0.0, isWall: false },
-                { mesh: this.truckLeftWallMesh, friction: 0.05, restitution: 0.0, isWall: true },
-                { mesh: this.truckRightWallMesh, friction: 0.05, restitution: 0.0, isWall: true },
-                { mesh: this.truckFrontWallMesh, friction: 0.05, restitution: 0.0, isWall: true },
-                { mesh: this.truckBackWallMesh, friction: 0.05, restitution: 0.0, isWall: true }
+                { mesh: this.truckFloorMesh, friction: 1.4, restitution: 0.0 },
+                { mesh: this.truckLeftWallMesh, friction: 0.02, restitution: 0.0 },
+                { mesh: this.truckRightWallMesh, friction: 0.02, restitution: 0.0 },
+                { mesh: this.truckFrontWallMesh, friction: 0.02, restitution: 0.0 },
+                { mesh: this.truckBackWallMesh, friction: 0.02, restitution: 0.0 }
             ];
             
             this.truckPhysicsAggregates = [];
-            physicsParts.forEach(({ mesh, friction, restitution, isWall }) => {
+            physicsParts.forEach(({ mesh, friction, restitution }) => {
                 // CRITICAL: Ensure world transform matches current parented pose
                 mesh.computeWorldMatrix(true);
                 const worldPos = mesh.getAbsolutePosition();
@@ -2474,14 +2593,15 @@ class Truck {
                 // velocity during contact with dynamic cargo.
                 if (aggregate.body && aggregate.body.setMotionType) {
                     aggregate.body.setMotionType(BABYLON.PhysicsMotionType.ANIMATED);
+                    if (aggregate.body.setPrestepType && BABYLON.PhysicsPrestepType) {
+                        aggregate.body.setPrestepType(BABYLON.PhysicsPrestepType.ACTION);
+                    }
                 }
                 
-                // CRITICAL: Use larger collision margin for walls to create buffer zone
-                // This prevents fast-moving items from interpenetrating before collision response
                 if (aggregate.shape && aggregate.shape.setMargin) {
-                    // The truck bodies are already thick; small margins avoid
-                    // inflated contacts that can launch cargo.
-                    const margin = isWall ? 0.06 : 0.04;
+                    // The truck bodies are already thick; tiny margins avoid
+                    // inflated edge contacts that can launch cargo.
+                    const margin = 0.005;
                     aggregate.shape.setMargin(margin);
                 }
                 

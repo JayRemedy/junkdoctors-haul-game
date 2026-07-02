@@ -957,6 +957,14 @@ class ItemManager {
 
         const baseLinearDamping = 0.15;
         const baseAngularDamping = 0.2;
+        const truckMovingAtPlacement = this.truck && (
+            Math.abs(this.truck.speed || 0) > 0.5 ||
+            this.truck.keys?.w ||
+            this.truck.keys?.s ||
+            this.truck.keys?.a ||
+            this.truck.keys?.d
+        );
+        const placementSettleMs = truckMovingAtPlacement ? 50 : 300;
 
         let placedItem;
 
@@ -980,14 +988,14 @@ class ItemManager {
                 {
                     mass: Math.max(1, itemDef.weight || 10),
                     restitution: 0.0,
-                    friction: 0.85
+                    friction: 1.0
                 },
                 this.scene
             );
             mesh.physicsAggregate = aggregate;
 
             if (aggregate.shape && aggregate.shape.setMargin) {
-                aggregate.shape.setMargin(0.02);
+                aggregate.shape.setMargin(0.01);
             }
 
             if (aggregate.body) {
@@ -995,6 +1003,9 @@ class ItemManager {
                 // dynamics. This prevents a placement collision impulse from
                 // turning into visible bounce.
                 aggregate.body.setMotionType(BABYLON.PhysicsMotionType.ANIMATED);
+                if (aggregate.body.setPrestepType && BABYLON.PhysicsPrestepType) {
+                    aggregate.body.setPrestepType(BABYLON.PhysicsPrestepType.TELEPORT);
+                }
                 aggregate.body.setLinearVelocity(BABYLON.Vector3.Zero());
                 aggregate.body.setAngularVelocity(BABYLON.Vector3.Zero());
                 aggregate.body.setLinearDamping(baseLinearDamping);
@@ -1028,9 +1039,14 @@ class ItemManager {
                 localY: localY,
                 localZ: localZ,
                 localRotation: localRotation,
+                settleStartedAt: nowMs,
+                settleLocalX: localX,
+                settleLocalY: localY,
+                settleLocalZ: localZ,
+                placementSettleMs,
                 baseLinearDamping,
                 baseAngularDamping,
-                becomeDynamicAt: nowMs + 250
+                becomeDynamicAt: nowMs + placementSettleMs
             };
 
         } else {
