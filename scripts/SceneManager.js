@@ -211,26 +211,19 @@ class SceneManager {
         );
         this.havokPlugin = havokPlugin;
         
-        // CRITICAL: Configure physics timestep and sub-stepping to prevent tunneling
-        // Sub-stepping runs physics multiple times per frame with smaller dt,
-        // which prevents fast-moving objects from passing through thin walls.
-        // 
-        // Default is 1/60 with no sub-steps. For reliable collision:
-        // - Use fixed timestep of 1/120 (8.33ms) 
-        // - With 2 sub-steps when frame takes longer than 16ms
-        // This ensures physics updates at least 120Hz effective rate
+        // Use a high-precision fixed timestep for Havok cargo physics.
+        // Smaller steps reduce contact jitter and false launch impulses when
+        // items meet the moving truck bed or walls.
         if (havokPlugin.setTimeStep) {
-            // Fixed timestep for deterministic physics
             havokPlugin.setTimeStep(1 / 120);
         }
         
-        // Configure sub-stepping: max 4 sub-steps when frame rate drops
-        // This prevents physics from "jumping" large distances in one step
+        // Babylon stores sub timestep in milliseconds, then passes seconds to
+        // the plugin. Match the 120 Hz fixed step without creating excess work.
         if (this.scene.getPhysicsEngine()) {
             const physicsEngine = this.scene.getPhysicsEngine();
-            // setSubTimeStep(numSubSteps) - run physics this many times per frame
             if (physicsEngine.setSubTimeStep) {
-                physicsEngine.setSubTimeStep(2); // 2 sub-steps = effective 240Hz physics
+                physicsEngine.setSubTimeStep(1000 / 120);
             }
         }
         
@@ -2622,4 +2615,3 @@ class SceneManager {
     
     debugMeshes() {}
 }
-
