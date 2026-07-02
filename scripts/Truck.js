@@ -1769,10 +1769,143 @@ class Truck {
         };
     }
 
+    getTruckPointVelocity(worldX, worldZ, truckVelX, truckVelZ, rotationRate) {
+        const relX = worldX - this.position.x;
+        const relZ = worldZ - this.position.z;
+
+        return new BABYLON.Vector3(
+            truckVelX + rotationRate * relZ,
+            0,
+            truckVelZ - rotationRate * relX
+        );
+    }
+
+    applyCargoStaticFriction(item, body, localX, localY, localZ, halfX, halfY, halfZ, truckVelX, truckVelZ, rotationRate) {
+        if (!item || !body || !body.getLinearVelocity || !body.setLinearVelocity) return false;
+
+        const insideCargo =
+            Math.abs(localX) <= this.cargoWidth / 2 + halfX &&
+            localZ >= -this.cargoLength / 2 - halfZ &&
+            localZ <= this.cargoLength / 2 + halfZ;
+        const restingCenterY = this.floorTopY + halfY;
+        const restingOnBed =
+            localY >= restingCenterY - 0.18 &&
+            localY <= restingCenterY + 0.2;
+
+        item.mesh.computeWorldMatrix(true);
+        const itemUp = BABYLON.Vector3.TransformNormal(BABYLON.Axis.Y, item.mesh.getWorldMatrix());
+        itemUp.normalize();
+        const uprightEnough = itemUp.y > 0.72;
+
+        // Static friction should hold during normal driving, then break loose
+        // under hard braking, sharp acceleration, or strong turning.
+        const longitudinalAccel = Math.abs(this.currentAcceleration || 0) * 0.44704;
+        const lateralAccel = Math.abs((this.speed || 0) * 0.44704 * rotationRate);
+        const staticAccelLimit = 9.0;
+        const staticTurnAccelLimit = 6.0;
+        const canHold =
+            insideCargo &&
+            restingOnBed &&
+            uprightEnough &&
+            longitudinalAccel <= staticAccelLimit &&
+            lateralAccel <= staticTurnAccelLimit;
+
+        const bedVelocity = this.getTruckPointVelocity(
+            item.mesh.position.x,
+            item.mesh.position.z,
+            truckVelX,
+            truckVelZ,
+            rotationRate
+        );
+        const vel = body.getLinearVelocity();
+        if (!vel) return false;
+
+        const slipSpeed = Math.sqrt(
+            Math.pow(vel.x - bedVelocity.x, 2) +
+            Math.pow(vel.z - bedVelocity.z, 2)
+        );
+        const maxStaticSlip = item._staticFrictionHeld ? Infinity : 0.7;
+
+        if (canHold && slipSpeed <= maxStaticSlip) {
+            if (!item._staticFrictionHeld) {
+                item._staticFrictionLocalX = localX;
+                item._staticFrictionLocalY = localY;
+                item._staticFrictionLocalZ = localZ;
+
+                const worldQuat = item.mesh.rotationQuaternion
+                    ? item.mesh.rotationQuaternion.clone()
+                    : BABYLON.Quaternion.RotationYawPitchRoll(
+                        item.mesh.rotation.y,
+                        item.mesh.rotation.x,
+                        item.mesh.rotation.z
+                    );
+                const truckQuat = BABYLON.Quaternion.RotationYawPitchRoll(this.rotation, 0, 0);
+                const truckQuatInv = truckQuat.clone();
+                truckQuatInv.invert();
+                item._staticFrictionLocalQuat = truckQuatInv.multiply(worldQuat);
+
+                if (body.setMotionType) {
+                    body.setMotionType(BABYLON.PhysicsMotionType.ANIMATED);
+                }
+                if (body.setPrestepType && BABYLON.PhysicsPrestepType) {
+                    body.setPrestepType(BABYLON.PhysicsPrestepType.TELEPORT);
+                }
+            }
+
+            const targetLocal = new BABYLON.Vector3(
+                item._staticFrictionLocalX ?? localX,
+                item._staticFrictionLocalY ?? localY,
+                item._staticFrictionLocalZ ?? localZ
+            );
+            const targetWorld = BABYLON.Vector3.TransformCoordinates(targetLocal, this.root.getWorldMatrix());
+            const truckQuat = BABYLON.Quaternion.RotationYawPitchRoll(this.rotation, 0, 0);
+            const targetQuat = truckQuat.multiply(
+                item._staticFrictionLocalQuat || item.localQuat || BABYLON.Quaternion.Identity()
+            );
+
+            item.mesh.position.copyFrom(targetWorld);
+            if (!item.mesh.rotationQuaternion) {
+                item.mesh.rotationQuaternion = targetQuat;
+            } else {
+                item.mesh.rotationQuaternion.copyFrom(targetQuat);
+            }
+            item.mesh.computeWorldMatrix(true);
+
+            if (body.setTargetTransform) {
+                body.setTargetTransform(targetWorld, targetQuat);
+            }
+            body.setLinearVelocity(bedVelocity);
+            if (body.setAngularVelocity) body.setAngularVelocity(BABYLON.Vector3.Zero());
+            if (body.setLinearDamping) body.setLinearDamping(item.baseLinearDamping || 0.45);
+            if (body.setAngularDamping) body.setAngularDamping(Math.max(item.baseAngularDamping || 0.8, 1.2));
+            item._staticFrictionHeld = true;
+            return true;
+        }
+
+        if (item._staticFrictionHeld) {
+            if (body.setPrestepType && BABYLON.PhysicsPrestepType) {
+                body.setPrestepType(BABYLON.PhysicsPrestepType.DISABLED);
+            }
+            if (body.setMotionType) {
+                body.setMotionType(BABYLON.PhysicsMotionType.DYNAMIC);
+            }
+            body.setLinearVelocity(bedVelocity);
+            if (body.setAngularVelocity) body.setAngularVelocity(BABYLON.Vector3.Zero());
+        }
+
+        item._staticFrictionHeld = false;
+        item._staticFrictionLocalX = null;
+        item._staticFrictionLocalY = null;
+        item._staticFrictionLocalZ = null;
+        item._staticFrictionLocalQuat = null;
+        return false;
+    }
+
     updateLoadedItems(dt, moveX, moveZ, rotationDelta) {
         // Items are physics bodies that collide with the truck's animated walls/floor.
-        // The key insight: DON'T fight the physics engine with manual velocity manipulation.
-        // Instead, rely on high friction and aggressive velocity capping to keep items stable.
+        // Havok handles sliding, tipping, and impacts; the static-friction pass
+        // below only keeps resting cargo coupled to the moving bed until normal
+        // friction would break under hard acceleration, braking, or turning.
 
         // CRITICAL: Sync root transform with current position/rotation BEFORE computing matrix
         // (applyTransform happens AFTER this function, so root may be stale)
@@ -2055,18 +2188,32 @@ class Truck {
             
             if (body && !item.isFallen) {
                 if (item.wasPlacedAsleep && !item._wokeForTruckMotion && truckIsActivelyMoving) {
-                    const relX = item.mesh.position.x - this.position.x;
-                    const relZ = item.mesh.position.z - this.position.z;
-                    const wakeVelocity = new BABYLON.Vector3(
-                        truckVelX + rotationRate * relZ,
-                        0,
-                        truckVelZ - rotationRate * relX
+                    const wakeVelocity = this.getTruckPointVelocity(
+                        item.mesh.position.x,
+                        item.mesh.position.z,
+                        truckVelX,
+                        truckVelZ,
+                        rotationRate
                     );
 
                     body.setLinearVelocity(wakeVelocity);
                     body.setAngularVelocity(BABYLON.Vector3.Zero());
                     item._wokeForTruckMotion = true;
                 }
+
+                this.applyCargoStaticFriction(
+                    item,
+                    body,
+                    localX,
+                    localY,
+                    localZ,
+                    halfX,
+                    halfY,
+                    halfZ,
+                    truckVelX,
+                    truckVelZ,
+                    rotationRate
+                );
 
                 if (body.getLinearVelocity && body.setLinearVelocity) {
                     const vel = body.getLinearVelocity();
